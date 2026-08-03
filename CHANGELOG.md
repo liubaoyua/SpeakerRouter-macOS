@@ -2,6 +2,13 @@
 
 All notable changes are documented in this file.
 
+## 0.5.1 - 2026-08-03
+
+- Blocked routing when the installed HAL driver does not match the bundled
+  version, replacing a low-level shared-transport error with an update prompt.
+- Wait for `coreaudiod` to load the replacement driver before reconnecting the
+  shared-memory transport.
+
 ## 0.5.0 - 2026-08-03
 
 - Replaced virtual-input capture with a private shared-memory audio transport.

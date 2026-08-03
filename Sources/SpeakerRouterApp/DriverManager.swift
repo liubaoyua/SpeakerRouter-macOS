@@ -53,6 +53,30 @@ enum DriverInstallationState: Equatable {
     }
     return false
   }
+
+  var isCompatibleForRouting: Bool {
+    if case .installed = self {
+      return true
+    }
+    return false
+  }
+
+  var routingUnavailableMessage: String {
+    switch self {
+    case .updateAvailable:
+      return "驱动版本不匹配，请先更新驱动"
+    case .notInstalled:
+      return "虚拟音频驱动尚未安装"
+    case .bundledDriverMissing:
+      return "当前 App 未包含音频驱动"
+    case .checking:
+      return "正在检查音频驱动…"
+    case .changing(let message):
+      return message
+    case .installed:
+      return ""
+    }
+  }
 }
 
 enum DriverManagerAction: String {

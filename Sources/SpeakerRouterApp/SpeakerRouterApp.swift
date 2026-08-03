@@ -271,6 +271,18 @@ final class RouterViewModel: ObservableObject {
       routeStatus = "实时音频引擎初始化失败"
       return
     }
+    guard driverState.isCompatibleForRouting else {
+      guardCoordinator.stopCleanly()
+      volumeWatcher.stop()
+      relayEngine.stop()
+      restoreFallbackPhysicalOutput()
+      virtualDeviceID = nil
+      activePhysicalDeviceUID = nil
+      failedRouteAttempt = nil
+      resetRelayHealthTracking()
+      routeStatus = driverState.routingUnavailableMessage
+      return
+    }
     var routeAttempt: String?
     do {
       guard

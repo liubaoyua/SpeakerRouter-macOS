@@ -15,7 +15,13 @@ public enum AudioRelayEngineError: Error, CustomStringConvertible, Sendable {
     case .audioUnitComponentMissing:
       "The HAL output audio unit is unavailable"
     case .operation(let name, let status):
-      "\(name) failed with Core Audio status \(status)"
+      if name == "Connect shared audio transport",
+        status == kAudioHardwareIllegalOperationError
+      {
+        "The installed audio driver rejected the shared transport protocol; update or reinstall the driver"
+      } else {
+        "\(name) failed with Core Audio status \(status)"
+      }
     }
   }
 }

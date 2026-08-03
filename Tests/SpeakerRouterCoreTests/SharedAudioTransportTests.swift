@@ -1,3 +1,4 @@
+import CoreAudio
 import SpeakerRouterAudioSupport
 import Testing
 @testable import SpeakerRouterCore
@@ -60,6 +61,24 @@ struct SharedAudioTransportTests {
     #expect(SRSharedAudioTransportParseConfigurationToken("", &disconnect))
     #expect(SRSharedAudioTransportConfigurationIsDisconnect(&disconnect))
     #expect(!SRSharedAudioTransportParseConfigurationToken("invalid", &disconnect))
+  }
+
+  @Test("An obsolete protocol token is rejected")
+  func obsoleteProtocolToken() {
+    var configuration = SRSharedAudioTransportConfiguration()
+    let accepted = "SR1|4096|/SR-000000000000000000000000".withCString {
+      SRSharedAudioTransportParseConfigurationToken($0, &configuration)
+    }
+    #expect(!accepted)
+  }
+
+  @Test("A rejected transport protocol produces an actionable error")
+  func rejectedProtocolError() {
+    let error = AudioRelayEngineError.operation(
+      "Connect shared audio transport",
+      kAudioHardwareIllegalOperationError
+    )
+    #expect(error.description.contains("update or reinstall the driver"))
   }
 
   @Test("Underflow is padded with silence")

@@ -84,4 +84,20 @@ case "${action}" in
     ;;
 esac
 
+previous_coreaudiod_pid=$(/usr/bin/pgrep -x coreaudiod || true)
 /usr/bin/killall coreaudiod || true
+
+# killall returns after delivering the signal, while launchd may still be running the old
+# AudioServerPlugIn for a short time. Do not tell the App to reconnect until coreaudiod has
+# actually been replaced, otherwise a new protocol token can reach the old driver binary.
+for attempt in {1..200}; do
+  current_coreaudiod_pid=$(/usr/bin/pgrep -x coreaudiod || true)
+  if [[ -n "${current_coreaudiod_pid}" &&
+    ( -z "${previous_coreaudiod_pid}" || "${current_coreaudiod_pid}" != "${previous_coreaudiod_pid}" ) ]]; then
+    exit 0
+  fi
+  /bin/sleep 0.05
+done
+
+echo "Core Audio did not restart after the driver operation" >&2
+exit 1
