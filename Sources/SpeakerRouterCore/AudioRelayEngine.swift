@@ -20,19 +20,8 @@ public enum AudioRelayEngineError: Error, CustomStringConvertible, Sendable {
   }
 }
 
-public struct AudioRelayStatistics: Codable, Equatable, Sendable {
-  public let capturedFrames: UInt64
+public struct AudioRelayStatistics: Equatable, Sendable {
   public let requestedRenderFrames: UInt64
-  public let nonSilentCapturedSamples: UInt64
-  public let nonSilentRenderedSamples: UInt64
-  public let underflowFrames: UInt64
-
-  public var hasRenderedSignal: Bool {
-    capturedFrames > 0
-      && requestedRenderFrames > 0
-      && nonSilentCapturedSamples > 0
-      && nonSilentRenderedSamples > 0
-  }
 
   public func renderCallbackAdvanced(since previous: AudioRelayStatistics) -> Bool {
     requestedRenderFrames > previous.requestedRenderFrames
@@ -148,20 +137,12 @@ public final class AudioRelayEngine: @unchecked Sendable {
   public func statistics() -> AudioRelayStatistics {
     guard let sharedBuffer else {
       return AudioRelayStatistics(
-        capturedFrames: 0,
-        requestedRenderFrames: 0,
-        nonSilentCapturedSamples: 0,
-        nonSilentRenderedSamples: 0,
-        underflowFrames: 0
+        requestedRenderFrames: 0
       )
     }
     let metrics = SRSharedAudioBufferGetMetrics(sharedBuffer)
     return AudioRelayStatistics(
-      capturedFrames: metrics.capturedFrames,
-      requestedRenderFrames: metrics.requestedRenderFrames,
-      nonSilentCapturedSamples: metrics.nonSilentCapturedSamples,
-      nonSilentRenderedSamples: metrics.nonSilentRenderedSamples,
-      underflowFrames: metrics.underflowFrames
+      requestedRenderFrames: metrics.requestedRenderFrames
     )
   }
 

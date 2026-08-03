@@ -1,5 +1,6 @@
 import SpeakerRouterAudioSupport
 import Testing
+@testable import SpeakerRouterCore
 
 @Suite("Shared audio transport")
 struct SharedAudioTransportTests {
@@ -31,10 +32,7 @@ struct SharedAudioTransportTests {
     #expect(read == 3)
     #expect(output == input)
     let metrics = SRSharedAudioBufferGetMetrics(appBuffer)
-    #expect(metrics.capturedFrames == 3)
     #expect(metrics.requestedRenderFrames == 3)
-    #expect(metrics.nonSilentCapturedSamples == 6)
-    #expect(metrics.nonSilentRenderedSamples == 6)
   }
 
   @Test("Disconnect configuration cannot be mapped")
@@ -64,7 +62,7 @@ struct SharedAudioTransportTests {
     #expect(!SRSharedAudioTransportParseConfigurationToken("invalid", &disconnect))
   }
 
-  @Test("Underflow is padded with silence and counted")
+  @Test("Underflow is padded with silence")
   func underflow() throws {
     let transport = try #require(SRSharedAudioTransportCreate(8, 2))
     defer { SRSharedAudioTransportDestroy(transport) }
@@ -80,7 +78,6 @@ struct SharedAudioTransportTests {
 
     #expect(read == 1)
     #expect(output == [0.5, -0.5, 0, 0, 0, 0])
-    #expect(SRSharedAudioBufferGetMetrics(buffer).underflowFrames == 2)
   }
 
   @Test("Writer overrun preserves the newest complete frames")
@@ -103,5 +100,40 @@ struct SharedAudioTransportTests {
 
     #expect(read == 4)
     #expect(output == [3, -3, 4, -4, 5, -5, 6, -6])
+  }
+
+  @Test("Gain is clamped and smoothly reaches the target")
+  func gain() throws {
+    let transport = try #require(SRSharedAudioTransportCreate(8, 2))
+    defer { SRSharedAudioTransportDestroy(transport) }
+    let buffer = SRSharedAudioTransportGetBuffer(transport)
+
+    SRSharedAudioBufferSetTargetGain(buffer, 2)
+    #expect(SRSharedAudioBufferGetTargetGain(buffer) == 1)
+    SRSharedAudioBufferSetTargetGain(buffer, 0)
+
+    let input = [Float](repeating: 1, count: 8)
+    input.withUnsafeBufferPointer {
+      _ = SRSharedAudioBufferWrite(buffer, $0.baseAddress!, 4)
+    }
+    var output = [Float](repeating: 0, count: 8)
+    output.withUnsafeMutableBufferPointer {
+      _ = SRSharedAudioBufferRead(buffer, $0.baseAddress!, 4)
+    }
+
+    #expect(output[0] == 0.75)
+    #expect(output[2] == 0.5)
+    #expect(output[4] == 0.25)
+    #expect(output[6] == 0)
+  }
+
+  @Test("Relay health depends only on the physical render callback")
+  func relayHealth() {
+    let baseline = AudioRelayStatistics(requestedRenderFrames: 100)
+    let healthy = AudioRelayStatistics(requestedRenderFrames: 200)
+    let stalled = AudioRelayStatistics(requestedRenderFrames: 100)
+
+    #expect(healthy.renderCallbackAdvanced(since: baseline))
+    #expect(!stalled.renderCallbackAdvanced(since: baseline))
   }
 }

@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define SRSharedAudioTransportPropertySelector 0x5352736du
-#define SRSharedAudioTransportProtocolVersion 1u
+#define SRSharedAudioTransportProtocolVersion 2u
 #define SRSharedAudioTransportNameCapacity 96u
 #define SRSharedAudioTransportTokenCapacity 160u
 
@@ -25,11 +25,7 @@ typedef struct SRSharedAudioTransportConfiguration {
 } SRSharedAudioTransportConfiguration;
 
 typedef struct SRSharedAudioMetrics {
-    uint64_t capturedFrames;
     uint64_t requestedRenderFrames;
-    uint64_t nonSilentCapturedSamples;
-    uint64_t nonSilentRenderedSamples;
-    uint64_t underflowFrames;
 } SRSharedAudioMetrics;
 
 // App-side lifecycle. The transport creates a one-time named shared-memory object. After the

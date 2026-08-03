@@ -23,11 +23,7 @@ struct SRSharedAudioBuffer {
     uint32_t reserved1;
     _Atomic uint64_t writePosition;
     _Atomic uint64_t readPosition;
-    _Atomic uint64_t capturedFrames;
     _Atomic uint64_t requestedRenderFrames;
-    _Atomic uint64_t nonSilentCapturedSamples;
-    _Atomic uint64_t nonSilentRenderedSamples;
-    _Atomic uint64_t underflowFrames;
     _Atomic float targetGain;
     float currentGain;
     float samples[];
@@ -184,11 +180,7 @@ SRSharedAudioTransport* SRSharedAudioTransportCreate(
     transport->buffer->channelCount = channelCount;
     atomic_init(&transport->buffer->writePosition, 0);
     atomic_init(&transport->buffer->readPosition, 0);
-    atomic_init(&transport->buffer->capturedFrames, 0);
     atomic_init(&transport->buffer->requestedRenderFrames, 0);
-    atomic_init(&transport->buffer->nonSilentCapturedSamples, 0);
-    atomic_init(&transport->buffer->nonSilentRenderedSamples, 0);
-    atomic_init(&transport->buffer->underflowFrames, 0);
     atomic_init(&transport->buffer->targetGain, 1.0f);
     transport->buffer->currentGain = 1.0f;
     return transport;
@@ -348,11 +340,18 @@ bool SRSharedAudioTransportParseConfigurationToken(
         return true;
     }
 
-    const char prefix[] = "SR1|";
-    if(strncmp(token, prefix, sizeof(prefix) - 1) != 0) {
+    char prefix[16] = {0};
+    int prefixLength = snprintf(
+        prefix,
+        sizeof(prefix),
+        "SR%u|",
+        SRSharedAudioTransportProtocolVersion
+    );
+    if(prefixLength <= 0 || (size_t)prefixLength >= sizeof(prefix) ||
+        strncmp(token, prefix, (size_t)prefixLength) != 0) {
         return false;
     }
-    const char* sizeStart = token + sizeof(prefix) - 1;
+    const char* sizeStart = token + prefixLength;
     char* sizeEnd = NULL;
     unsigned long mappingSize = strtoul(sizeStart, &sizeEnd, 10);
     if(sizeEnd == sizeStart || sizeEnd == NULL || *sizeEnd != '|' ||
@@ -381,11 +380,7 @@ void SRSharedAudioBufferReset(SRSharedAudioBuffer* buffer) {
     );
     atomic_store_explicit(&buffer->writePosition, 0, memory_order_relaxed);
     atomic_store_explicit(&buffer->readPosition, 0, memory_order_relaxed);
-    atomic_store_explicit(&buffer->capturedFrames, 0, memory_order_relaxed);
     atomic_store_explicit(&buffer->requestedRenderFrames, 0, memory_order_relaxed);
-    atomic_store_explicit(&buffer->nonSilentCapturedSamples, 0, memory_order_relaxed);
-    atomic_store_explicit(&buffer->nonSilentRenderedSamples, 0, memory_order_relaxed);
-    atomic_store_explicit(&buffer->underflowFrames, 0, memory_order_relaxed);
     buffer->currentGain = atomic_load_explicit(&buffer->targetGain, memory_order_relaxed);
 }
 
@@ -425,24 +420,6 @@ uint32_t SRSharedAudioBufferWrite(
         );
     }
 
-    uint64_t nonSilentSamples = 0;
-    size_t sampleCount = (size_t)frameCount * buffer->channelCount;
-    for(size_t sample = 0; sample < sampleCount; ++sample) {
-        float value = interleavedSamples[sample];
-        if(value > 0.000001f || value < -0.000001f) {
-            ++nonSilentSamples;
-        }
-    }
-    atomic_fetch_add_explicit(
-        &buffer->capturedFrames,
-        frameCount,
-        memory_order_relaxed
-    );
-    atomic_fetch_add_explicit(
-        &buffer->nonSilentCapturedSamples,
-        nonSilentSamples,
-        memory_order_relaxed
-    );
     atomic_store_explicit(
         &buffer->writePosition,
         writePosition + frameCount,
@@ -521,26 +498,9 @@ uint32_t SRSharedAudioBufferRead(
     }
     buffer->currentGain = targetGain;
 
-    uint64_t nonSilentSamples = 0;
-    for(size_t sample = 0; sample < requestedSamples; ++sample) {
-        float value = interleavedSamples[sample];
-        if(value > 0.000001f || value < -0.000001f) {
-            ++nonSilentSamples;
-        }
-    }
     atomic_fetch_add_explicit(
         &buffer->requestedRenderFrames,
         frameCount,
-        memory_order_relaxed
-    );
-    atomic_fetch_add_explicit(
-        &buffer->nonSilentRenderedSamples,
-        nonSilentSamples,
-        memory_order_relaxed
-    );
-    atomic_fetch_add_explicit(
-        &buffer->underflowFrames,
-        frameCount - framesToRead,
         memory_order_relaxed
     );
     atomic_store_explicit(
@@ -586,24 +546,8 @@ SRSharedAudioMetrics SRSharedAudioBufferGetMetrics(
     const SRSharedAudioBuffer* buffer
 ) {
     SRSharedAudioMetrics metrics = {
-        .capturedFrames = atomic_load_explicit(
-            &buffer->capturedFrames,
-            memory_order_relaxed
-        ),
         .requestedRenderFrames = atomic_load_explicit(
             &buffer->requestedRenderFrames,
-            memory_order_relaxed
-        ),
-        .nonSilentCapturedSamples = atomic_load_explicit(
-            &buffer->nonSilentCapturedSamples,
-            memory_order_relaxed
-        ),
-        .nonSilentRenderedSamples = atomic_load_explicit(
-            &buffer->nonSilentRenderedSamples,
-            memory_order_relaxed
-        ),
-        .underflowFrames = atomic_load_explicit(
-            &buffer->underflowFrames,
             memory_order_relaxed
         ),
     };

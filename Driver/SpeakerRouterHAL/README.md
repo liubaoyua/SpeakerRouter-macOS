@@ -13,13 +13,13 @@ Changes for SpeakerRouter:
 - a declared `CFString` custom property and private shared-memory stereo ring
   that transfer the HAL output mix without the app opening an input device.
 
-Build without installation:
+Build from the repository root without installation:
 
 ```sh
-xcodebuild -project NullAudio.xcodeproj -scheme NullAudio \
-  -configuration Debug CODE_SIGNING_ALLOWED=NO build
+./Scripts/build-driver.sh
 ```
 
-Do not install this driver while SpeakerAmp is the active system output. Driver
-installation and end-to-end audio testing require an explicit migration step so
-the current working audio route remains recoverable.
+The supported build path compiles both `NullAudio.c` and the shared-memory
+transport into a universal ad-hoc-signed bundle. The app provides guarded
+install, update, and uninstall actions; each action validates the expected
+bundle identifier before modifying `/Library/Audio/Plug-Ins/HAL`.

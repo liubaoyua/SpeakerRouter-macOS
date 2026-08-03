@@ -10,7 +10,6 @@ let package = Package(
   products: [
     .library(name: "SpeakerRouterCore", targets: ["SpeakerRouterCore"]),
     .executable(name: "SpeakerRouterApp", targets: ["SpeakerRouterApp"]),
-    .executable(name: "SpeakerRouterDiagnostics", targets: ["SpeakerRouterDiagnostics"]),
     .executable(name: "SpeakerRouterGuard", targets: ["SpeakerRouterGuard"]),
   ],
   targets: [
@@ -32,10 +31,6 @@ let package = Package(
         .linkedFramework("AppKit"),
         .linkedFramework("CoreAudio"),
       ]
-    ),
-    .executableTarget(
-      name: "SpeakerRouterDiagnostics",
-      dependencies: ["SpeakerRouterCore"]
     ),
     .executableTarget(
       name: "SpeakerRouterGuard",

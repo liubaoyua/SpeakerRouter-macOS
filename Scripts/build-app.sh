@@ -23,10 +23,6 @@ cp "${project_dir}/.build/release/SpeakerRouterGuard" \
   "${contents}/Resources/SpeakerRouterHAL.driver"
 cp "${project_dir}/Scripts/driver-manager.sh" \
   "${contents}/Resources/driver-manager.sh"
-cp "${project_dir}/Assets/MenuBarIconTemplate.png" \
-  "${contents}/Resources/MenuBarIconTemplate.png"
-cp "${project_dir}/Assets/MenuBarIconTemplate@2x.png" \
-  "${contents}/Resources/MenuBarIconTemplate@2x.png"
 cp "${project_dir}/Assets/SpeakerRouter.icns" \
   "${contents}/Resources/SpeakerRouter.icns"
 cp "${project_dir}/Packaging/SpeakerRouter-Info.plist" "${contents}/Info.plist"

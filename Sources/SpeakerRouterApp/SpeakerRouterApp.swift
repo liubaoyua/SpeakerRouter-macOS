@@ -72,35 +72,6 @@ struct SpeakerRouterApp: App {
 
 @MainActor
 final class RouterApplicationDelegate: NSObject, NSApplicationDelegate {
-  private var debugWindow: NSWindow?
-
-  func applicationDidFinishLaunching(_ notification: Notification) {
-    guard CommandLine.arguments.contains("--show-window") else {
-      return
-    }
-
-    DispatchQueue.main.async { [weak self] in
-      guard let model = RouterViewModel.shared else { return }
-      self?.showDebugWindow(model: model)
-    }
-  }
-
-  private func showDebugWindow(model: RouterViewModel) {
-    let window = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 440, height: 560),
-      styleMask: [.titled, .closable, .miniaturizable],
-      backing: .buffered,
-      defer: false
-    )
-    window.title = "SpeakerRouter"
-    window.isReleasedWhenClosed = false
-    window.contentViewController = NSHostingController(rootView: RouterMenuView(model: model))
-    window.center()
-    window.makeKeyAndOrderFront(nil)
-    NSApplication.shared.activate(ignoringOtherApps: true)
-    debugWindow = window
-  }
-
   func applicationWillTerminate(_ notification: Notification) {
     RouterViewModel.shared?.shutdown()
   }
@@ -126,8 +97,6 @@ final class RouterViewModel: ObservableObject {
   private let driverManager = DriverManager()
   private let relayEngine: AudioRelayEngine?
   private let store: FileRoutingStateStore
-  private let diagnosticsURL: URL?
-  private var diagnosticsTimer: Timer?
   private var relayHealthTimer: Timer?
   private var previousRelayStatistics: AudioRelayStatistics?
   private var stalledRelayHealthChecks = 0
@@ -143,11 +112,6 @@ final class RouterViewModel: ObservableObject {
       for: .applicationSupportDirectory,
       in: .userDomainMask
     )[0]
-    diagnosticsURL = Self.commandLineArgument(after: "--diagnostics-file")
-      .map { URL(fileURLWithPath: $0) }
-      ?? appSupport
-        .appendingPathComponent("SpeakerRouter", isDirectory: true)
-        .appendingPathComponent("live-diagnostics.json")
     relayEngine = try? AudioRelayEngine()
     store = FileRoutingStateStore(
       fileURL:
@@ -165,13 +129,6 @@ final class RouterViewModel: ObservableObject {
       timeInterval: 1,
       target: self,
       selector: #selector(relayHealthTimerFired),
-      userInfo: nil,
-      repeats: true
-    )
-    diagnosticsTimer = Timer.scheduledTimer(
-      timeInterval: 0.5,
-      target: self,
-      selector: #selector(diagnosticsTimerFired),
       userInfo: nil,
       repeats: true
     )
@@ -230,12 +187,9 @@ final class RouterViewModel: ObservableObject {
   }
 
   func shutdown() {
-    diagnosticsTimer?.invalidate()
-    diagnosticsTimer = nil
     relayHealthTimer?.invalidate()
     relayHealthTimer = nil
     resetRelayHealthTracking()
-    writeRelayDiagnostics()
     guardCoordinator.stopCleanly()
     volumeWatcher.stop()
     relayEngine?.stop()
@@ -616,59 +570,6 @@ final class RouterViewModel: ObservableObject {
     stalledRelayHealthChecks = 0
   }
 
-  @objc private func diagnosticsTimerFired() {
-    writeRelayDiagnostics()
-  }
-
-  private func writeRelayDiagnostics() {
-    guard let diagnosticsURL, let relayEngine else { return }
-    let snapshot = RelayDiagnosticsSnapshot(
-      schemaVersion: 5,
-      updatedAt: Date(),
-      processID: ProcessInfo.processInfo.processIdentifier,
-      appVersion: Bundle.main.object(
-        forInfoDictionaryKey: "CFBundleShortVersionString"
-      ) as? String ?? "未知",
-      audioTransport: "shared-memory",
-      driverStatus: driverState.description,
-      selectedDeviceUID: selectedUID,
-      selectedDeviceName: devices.first(where: { $0.id == selectedUID })?.displayName,
-      routeStatus: routeStatus,
-      statistics: relayEngine.statistics()
-    )
-    do {
-      let directory = diagnosticsURL.deletingLastPathComponent()
-      try FileManager.default.createDirectory(
-        at: directory,
-        withIntermediateDirectories: true
-      )
-      try JSONEncoder().encode(snapshot).write(to: diagnosticsURL, options: .atomic)
-    } catch {
-      // Diagnostics must never disrupt routing.
-    }
-  }
-
-  private static func commandLineArgument(after name: String) -> String? {
-    guard let index = CommandLine.arguments.firstIndex(of: name),
-      CommandLine.arguments.indices.contains(index + 1)
-    else {
-      return nil
-    }
-    return CommandLine.arguments[index + 1]
-  }
-}
-
-private struct RelayDiagnosticsSnapshot: Codable {
-  let schemaVersion: Int
-  let updatedAt: Date
-  let processID: Int32
-  let appVersion: String
-  let audioTransport: String
-  let driverStatus: String
-  let selectedDeviceUID: String?
-  let selectedDeviceName: String?
-  let routeStatus: String
-  let statistics: AudioRelayStatistics
 }
 
 private struct DriverRecoveryError: LocalizedError {

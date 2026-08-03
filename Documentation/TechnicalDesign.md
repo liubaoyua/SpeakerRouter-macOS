@@ -33,9 +33,9 @@ created by the app. A declared `CFString` custom device property carries a
 one-time random mapping token to the remote driver service; the app unlinks the
 name after the driver maps it.
 
-The first implementation is installed under `/Library/Audio/Plug-Ins/HAL` for
-personal use. It must be universal (`arm64` and `x86_64`) and signed before it
-is treated as distributable; ad-hoc local development is acceptable initially.
+The driver is installed under `/Library/Audio/Plug-Ins/HAL`. Local builds are
+universal (`arm64` and `x86_64`) and ad-hoc signed. Public binary distribution
+requires Developer ID signing and notarization.
 
 ### AudioRelayEngine
 
@@ -55,7 +55,9 @@ An output switch follows this sequence:
 4. Start the selected physical output before making the virtual device default.
 5. Ramp to the new device's remembered gain.
 
-Underruns output silence and increment a shared diagnostic counter.
+Underruns output silence. The shared header tracks only the physical render
+callback frame count required by route-health recovery; it does not scan audio
+samples or perform diagnostic work on either real-time thread.
 
 ### OutputDeviceRepository
 
