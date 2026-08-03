@@ -17,6 +17,7 @@ A minimal user-space driver.
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <dispatch/dispatch.h>
 #include <mach/mach_time.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -97,10 +98,6 @@ A minimal user-space driver.
 //		- master output volume
 //		- master input mute
 //		- master output mute
-//		- master input data source
-//		- master output data source
-//		- master play-through data destination
-//		- all are for illustration purposes only and do not actually manipulate data
 
 
 //	Declare the internal object ID numbers for all the objects this driver implements. Note that
@@ -152,14 +149,14 @@ static Float64								gDevice_AnchorSampleTime		= 0.0;
 static UInt64								gDevice_AnchorHostTime			= 0;
 
 // The HAL delivers a single mixed output stream. The relay app consumes the matching input
-// stream. Both callbacks are real-time code, so the bridge is a preallocated SPSC ring buffer
-// with atomic positions and no locks or allocation.
+// stream. Both callbacks are real-time code, so the bridge is a preallocated ring buffer with
+// no locks or allocation. Buffer locations are derived from the device timeline supplied by
+// Core Audio. This is important because multiple clients may read the same input concurrently;
+// a shared sequential read position would let one client consume another client's audio.
 static const UInt64						kLoopbackBufferFrames			= 65536;
-static const UInt64						kLoopbackTargetLatencyFrames	= 1024;
 static Float32							gLoopbackBuffer[65536 * 2];
-static _Atomic UInt64					gLoopbackWritePosition			= 0;
-static _Atomic UInt64					gLoopbackReadPosition			= 0;
-static _Atomic bool						gLoopbackReaderInitialized		= false;
+static _Atomic UInt64					gLoopbackLatestWrittenEnd		= 0;
+static _Atomic bool						gLoopbackHasWrittenData			= false;
 
 static bool									gStream_Input_IsActive			= true;
 static bool									gStream_Output_IsActive			= true;
@@ -1960,15 +1957,15 @@ static OSStatus	NullAudio_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
 			switch(inAddress->mScope)
 			{
 				case kAudioObjectPropertyScopeGlobal:
-					*outDataSize = 8 * sizeof(AudioObjectID);
+					*outDataSize = 6 * sizeof(AudioObjectID);
 					break;
 					
 				case kAudioObjectPropertyScopeInput:
-					*outDataSize = 4 * sizeof(AudioObjectID);
+					*outDataSize = 3 * sizeof(AudioObjectID);
 					break;
 					
 				case kAudioObjectPropertyScopeOutput:
-					*outDataSize = 4 * sizeof(AudioObjectID);
+					*outDataSize = 3 * sizeof(AudioObjectID);
 					break;
 			};
 			break;
@@ -2031,7 +2028,7 @@ static OSStatus	NullAudio_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
 			break;
 
 		case kAudioObjectPropertyControlList:
-			*outDataSize = 7 * sizeof(AudioObjectID);
+			*outDataSize = 4 * sizeof(AudioObjectID);
 			break;
 
 		case kAudioDevicePropertySafetyOffset:
@@ -2169,44 +2166,59 @@ static OSStatus	NullAudio_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			switch(inAddress->mScope)
 			{
 				case kAudioObjectPropertyScopeGlobal:
-					//	global scope means return all objects
-					if(theNumberItemsToFetch > 9)
 					{
-						theNumberItemsToFetch = 9;
-					}
-					
-					//	fill out the list with as many objects as requested, which is everything
-					for(theItemIndex = 0; theItemIndex < theNumberItemsToFetch; ++theItemIndex)
-					{
-						((AudioObjectID*)outData)[theItemIndex] = kObjectID_Stream_Input + theItemIndex;
+						const AudioObjectID theObjects[] = {
+							kObjectID_Stream_Input,
+							kObjectID_Volume_Input_Master,
+							kObjectID_Mute_Input_Master,
+							kObjectID_Stream_Output,
+							kObjectID_Volume_Output_Master,
+							kObjectID_Mute_Output_Master
+						};
+						if(theNumberItemsToFetch > 6)
+						{
+							theNumberItemsToFetch = 6;
+						}
+						for(theItemIndex = 0; theItemIndex < theNumberItemsToFetch; ++theItemIndex)
+						{
+							((AudioObjectID*)outData)[theItemIndex] = theObjects[theItemIndex];
+						}
 					}
 					break;
 					
 				case kAudioObjectPropertyScopeInput:
-					//	input scope means just the objects on the input side
-					if(theNumberItemsToFetch > 4)
 					{
-						theNumberItemsToFetch = 4;
-					}
-					
-					//	fill out the list with the right objects
-					for(theItemIndex = 0; theItemIndex < theNumberItemsToFetch; ++theItemIndex)
-					{
-						((AudioObjectID*)outData)[theItemIndex] = kObjectID_Stream_Input + theItemIndex;
+						const AudioObjectID theObjects[] = {
+							kObjectID_Stream_Input,
+							kObjectID_Volume_Input_Master,
+							kObjectID_Mute_Input_Master
+						};
+						if(theNumberItemsToFetch > 3)
+						{
+							theNumberItemsToFetch = 3;
+						}
+						for(theItemIndex = 0; theItemIndex < theNumberItemsToFetch; ++theItemIndex)
+						{
+							((AudioObjectID*)outData)[theItemIndex] = theObjects[theItemIndex];
+						}
 					}
 					break;
 					
 				case kAudioObjectPropertyScopeOutput:
-					//	output scope means just the objects on the output side
-					if(theNumberItemsToFetch > 4)
 					{
-						theNumberItemsToFetch = 4;
-					}
-					
-					//	fill out the list with the right objects
-					for(theItemIndex = 0; theItemIndex < theNumberItemsToFetch; ++theItemIndex)
-					{
-						((AudioObjectID*)outData)[theItemIndex] = kObjectID_Stream_Output + theItemIndex;
+						const AudioObjectID theObjects[] = {
+							kObjectID_Stream_Output,
+							kObjectID_Volume_Output_Master,
+							kObjectID_Mute_Output_Master
+						};
+						if(theNumberItemsToFetch > 3)
+						{
+							theNumberItemsToFetch = 3;
+						}
+						for(theItemIndex = 0; theItemIndex < theNumberItemsToFetch; ++theItemIndex)
+						{
+							((AudioObjectID*)outData)[theItemIndex] = theObjects[theItemIndex];
+						}
 					}
 					break;
 			};
@@ -2396,21 +2408,22 @@ static OSStatus	NullAudio_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			//	number is allowed to be smaller than the actual size of the list. In such
 			//	case, only that number of items will be returned
 			theNumberItemsToFetch = inDataSize / sizeof(AudioObjectID);
-			if(theNumberItemsToFetch > 7)
+			if(theNumberItemsToFetch > 4)
 			{
-				theNumberItemsToFetch = 7;
+				theNumberItemsToFetch = 4;
 			}
 			
-			//	fill out the list with as many objects as requested, which is everything
+			//	Expose only controls used by SpeakerRouter. The sample driver's selector
+			//	controls appear as fake devices in macOS Sound settings.
 			for(theItemIndex = 0; theItemIndex < theNumberItemsToFetch; ++theItemIndex)
 			{
-				if(theItemIndex < 3)
+				if(theItemIndex < 2)
 				{
 					((AudioObjectID*)outData)[theItemIndex] = kObjectID_Volume_Input_Master + theItemIndex;
 				}
 				else
 				{
-					((AudioObjectID*)outData)[theItemIndex] = kObjectID_Volume_Output_Master + (theItemIndex - 3);
+					((AudioObjectID*)outData)[theItemIndex] = kObjectID_Volume_Output_Master + (theItemIndex - 2);
 				}
 			}
 			
@@ -4017,9 +4030,8 @@ static OSStatus	NullAudio_StartIO(AudioServerPlugInDriverRef inDriver, AudioObje
 		gDevice_AnchorSampleTime = 0;
 		gDevice_AnchorHostTime = mach_absolute_time();
 		memset(gLoopbackBuffer, 0, sizeof(gLoopbackBuffer));
-		atomic_store_explicit(&gLoopbackWritePosition, 0, memory_order_relaxed);
-		atomic_store_explicit(&gLoopbackReadPosition, 0, memory_order_relaxed);
-		atomic_store_explicit(&gLoopbackReaderInitialized, false, memory_order_release);
+		atomic_store_explicit(&gLoopbackLatestWrittenEnd, 0, memory_order_relaxed);
+		atomic_store_explicit(&gLoopbackHasWrittenData, false, memory_order_release);
 	}
 	else
 	{
@@ -4194,10 +4206,12 @@ Done:
 static OSStatus	NullAudio_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo* inIOCycleInfo, void* ioMainBuffer, void* ioSecondaryBuffer)
 {
 	//	Bridge the mixed output stream to the input stream consumed by SpeakerRouterApp. The
-	//	callbacks may execute on different real-time threads, so only atomic counters and bounded
-	//	memory copies are allowed here.
+	//	callbacks may execute on different real-time threads, so only atomic state and bounded
+	//	memory copies are allowed here. Core Audio's device timeline is the shared coordinate
+	//	system: output sample time selects where to write and input sample time selects where to
+	//	read. Each input client can therefore read independently without consuming global state.
 	
-	#pragma unused(inClientID, inIOCycleInfo, ioSecondaryBuffer)
+	#pragma unused(inClientID, ioSecondaryBuffer)
 	
 	//	declare the local variables
 	OSStatus theAnswer = 0;
@@ -4207,6 +4221,8 @@ static OSStatus	NullAudio_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_DoIOOperation: bad device ID");
 	FailWithAction((inStreamObjectID != kObjectID_Stream_Input) && (inStreamObjectID != kObjectID_Stream_Output), theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_DoIOOperation: bad stream ID");
 	FailWithAction(inIOBufferFrameSize > kLoopbackBufferFrames, theAnswer = kAudioHardwareBadPropertySizeError, Done, "NullAudio_DoIOOperation: IO buffer exceeds loopback capacity");
+	FailWithAction(inIOCycleInfo == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "NullAudio_DoIOOperation: missing IO cycle info");
+	FailWithAction(ioMainBuffer == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "NullAudio_DoIOOperation: missing main buffer");
 
 	const UInt64 theFrameCount = inIOBufferFrameSize;
 	const UInt64 theSampleCount = theFrameCount * 2;
@@ -4214,8 +4230,17 @@ static OSStatus	NullAudio_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
 
 	if(inOperationID == kAudioServerPlugInIOOperationWriteMix)
 	{
-		UInt64 theWritePosition = atomic_load_explicit(&gLoopbackWritePosition, memory_order_relaxed);
-		UInt64 theStartFrame = theWritePosition % kLoopbackBufferFrames;
+		const AudioTimeStamp* theOutputTime = &inIOCycleInfo->mOutputTime;
+		if(((theOutputTime->mFlags & kAudioTimeStampSampleTimeValid) == 0) ||
+			!isfinite(theOutputTime->mSampleTime) ||
+			(theOutputTime->mSampleTime < 0) ||
+			(theOutputTime->mSampleTime > ((Float64)UINT64_MAX - (Float64)theFrameCount)))
+		{
+			goto Done;
+		}
+
+		UInt64 theWriteFrame = (UInt64)theOutputTime->mSampleTime;
+		UInt64 theStartFrame = theWriteFrame % kLoopbackBufferFrames;
 		UInt64 theFirstFrames = kLoopbackBufferFrames - theStartFrame;
 		if(theFirstFrames > theFrameCount)
 		{
@@ -4234,55 +4259,36 @@ static OSStatus	NullAudio_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
 				(theFrameCount - theFirstFrames) * 2 * sizeof(Float32)
 			);
 		}
-		atomic_store_explicit(
-			&gLoopbackWritePosition,
-			theWritePosition + theFrameCount,
-			memory_order_release
-		);
+		atomic_store_explicit(&gLoopbackLatestWrittenEnd, theWriteFrame + theFrameCount, memory_order_release);
+		atomic_store_explicit(&gLoopbackHasWrittenData, true, memory_order_release);
 	}
 	else if(inOperationID == kAudioServerPlugInIOOperationReadInput)
 	{
-		UInt64 theWritePosition = atomic_load_explicit(&gLoopbackWritePosition, memory_order_acquire);
-		if(!atomic_load_explicit(&gLoopbackReaderInitialized, memory_order_acquire))
-		{
-			UInt64 theInitialLatency = theWritePosition < kLoopbackTargetLatencyFrames
-				? theWritePosition
-				: kLoopbackTargetLatencyFrames;
-			atomic_store_explicit(
-				&gLoopbackReadPosition,
-				theWritePosition - theInitialLatency,
-				memory_order_relaxed
-			);
-			atomic_store_explicit(&gLoopbackReaderInitialized, true, memory_order_release);
-		}
-
-		UInt64 theReadPosition = atomic_load_explicit(&gLoopbackReadPosition, memory_order_relaxed);
-		if(theWritePosition < theReadPosition)
-		{
-			theReadPosition = theWritePosition;
-		}
-		UInt64 theAvailableFrames = theWritePosition - theReadPosition;
-		if(theAvailableFrames > kLoopbackBufferFrames)
-		{
-			UInt64 theRecoveryLatency = theWritePosition < kLoopbackTargetLatencyFrames
-				? theWritePosition
-				: kLoopbackTargetLatencyFrames;
-			theReadPosition = theWritePosition - theRecoveryLatency;
-			theAvailableFrames = theRecoveryLatency;
-		}
-
-		if(theAvailableFrames < theFrameCount)
+		const AudioTimeStamp* theInputTime = &inIOCycleInfo->mInputTime;
+		if(((theInputTime->mFlags & kAudioTimeStampSampleTimeValid) == 0) ||
+			!isfinite(theInputTime->mSampleTime) ||
+			(theInputTime->mSampleTime < 0) ||
+			(theInputTime->mSampleTime > ((Float64)UINT64_MAX - (Float64)theFrameCount)) ||
+			!atomic_load_explicit(&gLoopbackHasWrittenData, memory_order_acquire))
 		{
 			memset(theSamples, 0, theSampleCount * sizeof(Float32));
-			atomic_store_explicit(
-				&gLoopbackReadPosition,
-				theWritePosition,
-				memory_order_relaxed
-			);
+			goto Done;
+		}
+
+		UInt64 theReadFrame = (UInt64)theInputTime->mSampleTime;
+		UInt64 theReadEnd = theReadFrame + theFrameCount;
+		UInt64 theLatestWrittenEnd = atomic_load_explicit(&gLoopbackLatestWrittenEnd, memory_order_acquire);
+		bool theReadIsAhead = theReadEnd > theLatestWrittenEnd;
+		bool theReadWasOverwritten = (theLatestWrittenEnd > kLoopbackBufferFrames) &&
+			(theReadFrame < (theLatestWrittenEnd - kLoopbackBufferFrames));
+
+		if(theReadIsAhead || theReadWasOverwritten)
+		{
+			memset(theSamples, 0, theSampleCount * sizeof(Float32));
 		}
 		else
 		{
-			UInt64 theStartFrame = theReadPosition % kLoopbackBufferFrames;
+			UInt64 theStartFrame = theReadFrame % kLoopbackBufferFrames;
 			UInt64 theFirstFrames = kLoopbackBufferFrames - theStartFrame;
 			if(theFirstFrames > theFrameCount)
 			{
@@ -4301,11 +4307,6 @@ static OSStatus	NullAudio_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
 					(theFrameCount - theFirstFrames) * 2 * sizeof(Float32)
 				);
 			}
-			atomic_store_explicit(
-				&gLoopbackReadPosition,
-				theReadPosition + theFrameCount,
-				memory_order_relaxed
-			);
 		}
 	}
 

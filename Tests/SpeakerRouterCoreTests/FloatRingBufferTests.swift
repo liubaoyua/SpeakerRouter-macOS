@@ -1,5 +1,6 @@
 import SpeakerRouterAudioSupport
 import Testing
+@testable import SpeakerRouterCore
 
 @Suite("Float ring buffer")
 struct FloatRingBufferTests {
@@ -75,5 +76,33 @@ struct FloatRingBufferTests {
     #expect(output[2] == 0.5)
     #expect(output[4] == 0.25)
     #expect(output[6] == 0)
+  }
+
+  @Test("Relay health requires both callbacks to advance")
+  func relayHealth() {
+    let baseline = AudioRelayStatistics(
+      capturedFrames: 100,
+      requestedRenderFrames: 100,
+      nonSilentCapturedSamples: 0,
+      nonSilentRenderedSamples: 0,
+      underflowFrames: 0
+    )
+    let healthy = AudioRelayStatistics(
+      capturedFrames: 200,
+      requestedRenderFrames: 200,
+      nonSilentCapturedSamples: 0,
+      nonSilentRenderedSamples: 0,
+      underflowFrames: 0
+    )
+    let captureOnly = AudioRelayStatistics(
+      capturedFrames: 200,
+      requestedRenderFrames: 100,
+      nonSilentCapturedSamples: 0,
+      nonSilentRenderedSamples: 0,
+      underflowFrames: 0
+    )
+
+    #expect(healthy.callbacksAdvanced(since: baseline))
+    #expect(!captureOnly.callbacksAdvanced(since: baseline))
   }
 }

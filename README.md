@@ -37,12 +37,29 @@ window:
 The `--show-window` option is only a test hook. A normal launch remains a
 menu-bar-only app.
 
-## Local install
+## Driver management
 
-The HAL driver changes a system audio component and requires administrator
-approval. Build it first, then run `Scripts/install-driver.sh` as root.
-`Scripts/uninstall-driver.sh` only removes a bundle whose identifier is exactly
-`com.liubaoyuan.SpeakerRouterHAL`.
+The packaged app includes its matching HAL driver. The menu bar UI shows whether
+the driver is missing, current, or needs an update, and provides install/update,
+reinstall, and uninstall actions. macOS requests administrator approval before
+any of these actions modify `/Library/Audio/Plug-Ins/HAL`.
+
+For command-line development, build the driver first and run
+`Scripts/install-driver.sh` as root. Both the UI and command-line scripts share
+the same guarded helper, which only replaces or removes a bundle whose identifier
+is exactly `com.liubaoyuan.SpeakerRouterHAL`.
+
+SpeakerRouter is one full-duplex Core Audio device: it appears once under Output
+and once under Input. The input stream is how the relay receives the system mix;
+it is not an additional installed driver. Unused data-source selectors from the
+upstream sample driver are intentionally not exposed.
+
+The app verifies routing health from live capture and render frame counters. If
+both callbacks stop advancing after an audio-service restart, SpeakerRouter
+automatically tears down the stale Core Audio objects and rebuilds the route.
+It also keeps a silent output client attached to the virtual device so existing
+players cannot leave the system-mix writer dormant after the default device
+changes.
 
 Launch-at-login is registered only after `SpeakerRouter.app` has been copied
 into `/Applications`; development builds under `DerivedData` deliberately do

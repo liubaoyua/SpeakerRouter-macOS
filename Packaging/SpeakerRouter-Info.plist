@@ -15,9 +15,11 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.3.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>12</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SpeakerRouter 需要读取虚拟音频设备，以便把系统声音转发到你选择的扬声器。</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>

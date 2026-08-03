@@ -36,6 +36,11 @@ public struct AudioRelayStatistics: Codable, Equatable, Sendable {
       && nonSilentCapturedSamples > 0
       && nonSilentRenderedSamples > 0
   }
+
+  public func callbacksAdvanced(since previous: AudioRelayStatistics) -> Bool {
+    capturedFrames > previous.capturedFrames
+      && requestedRenderFrames > previous.requestedRenderFrames
+  }
 }
 
 public final class AudioRelayEngine: @unchecked Sendable {
@@ -44,8 +49,8 @@ public final class AudioRelayEngine: @unchecked Sendable {
   private static let ringCapacityFrames: UInt32 = 131_072
 
   private let ringBuffer: OpaquePointer
-  private var sourceDeviceID: AudioObjectID?
-  private var sourceIOProcID: AudioDeviceIOProcID?
+  private let sourceCaptureBuffer: UnsafeMutableRawPointer
+  private var sourceInputUnit: AudioUnit?
   private var outputUnit: AudioUnit?
   private(set) public var isRunning = false
 
@@ -59,10 +64,19 @@ public final class AudioRelayEngine: @unchecked Sendable {
       throw AudioRelayEngineError.ringBufferAllocation
     }
     self.ringBuffer = ringBuffer
+    sourceCaptureBuffer = UnsafeMutableRawPointer.allocate(
+      byteCount: Int(
+        Self.maximumFramesPerSlice
+          * Self.channelCount
+          * UInt32(MemoryLayout<Float>.size)
+      ),
+      alignment: MemoryLayout<Float>.alignment
+    )
   }
 
   deinit {
     stop()
+    sourceCaptureBuffer.deallocate()
     SRFloatRingBufferDestroy(ringBuffer)
   }
 
@@ -87,30 +101,17 @@ public final class AudioRelayEngine: @unchecked Sendable {
         sampleRate: sampleRate
       )
 
-      try check(AudioUnitInitialize(output), "Initialize relay output")
+      let sourceInput = try makeHALAudioUnit()
+      sourceInputUnit = sourceInput
+      try configureSourceInputUnit(
+        sourceInput,
+        deviceID: sourceDeviceID,
+        sampleRate: sampleRate
+      )
 
-      var sourceIOProcID: AudioDeviceIOProcID?
-      try check(
-        AudioDeviceCreateIOProcID(
-          sourceDeviceID,
-          speakerRouterSourceIOProc,
-          Unmanaged.passUnretained(self).toOpaque(),
-          &sourceIOProcID
-        ),
-        "Create virtual-device IO procedure"
-      )
-      guard let sourceIOProcID else {
-        throw AudioRelayEngineError.operation(
-          "Create virtual-device IO procedure",
-          kAudioHardwareUnspecifiedError
-        )
-      }
-      self.sourceDeviceID = sourceDeviceID
-      self.sourceIOProcID = sourceIOProcID
-      try check(
-        AudioDeviceStart(sourceDeviceID, sourceIOProcID),
-        "Start virtual-device IO procedure"
-      )
+      try check(AudioUnitInitialize(output), "Initialize relay output")
+      try check(AudioUnitInitialize(sourceInput), "Initialize virtual-device input")
+      try check(AudioOutputUnitStart(sourceInput), "Start virtual-device input")
       try check(AudioOutputUnitStart(output), "Start relay output")
       isRunning = true
       SRFloatRingBufferSetTargetGain(ringBuffer, gain)
@@ -130,13 +131,13 @@ public final class AudioRelayEngine: @unchecked Sendable {
       AudioUnitUninitialize(outputUnit)
       AudioComponentInstanceDispose(outputUnit)
     }
-    if let sourceDeviceID, let sourceIOProcID {
-      AudioDeviceStop(sourceDeviceID, sourceIOProcID)
-      AudioDeviceDestroyIOProcID(sourceDeviceID, sourceIOProcID)
+    if let sourceInputUnit {
+      AudioOutputUnitStop(sourceInputUnit)
+      AudioUnitUninitialize(sourceInputUnit)
+      AudioComponentInstanceDispose(sourceInputUnit)
     }
     outputUnit = nil
-    sourceDeviceID = nil
-    sourceIOProcID = nil
+    sourceInputUnit = nil
     isRunning = false
   }
 
@@ -155,26 +156,36 @@ public final class AudioRelayEngine: @unchecked Sendable {
     )
   }
 
-  fileprivate func capture(
-    inputData: UnsafePointer<AudioBufferList>
+  fileprivate func captureFromInputUnit(
+    actionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
+    timestamp: UnsafePointer<AudioTimeStamp>,
+    frameCount: UInt32
   ) -> OSStatus {
-    let mutableInputData = UnsafeMutablePointer<AudioBufferList>(mutating: inputData)
-    let buffers = UnsafeMutableAudioBufferListPointer(mutableInputData)
-    guard buffers.count == 1,
-      buffers[0].mNumberChannels == Self.channelCount,
-      let data = buffers[0].mData
-    else {
+    guard frameCount <= Self.maximumFramesPerSlice, let sourceInputUnit else {
       return kAudio_ParamError
     }
-    let bytesPerFrame = Self.channelCount * UInt32(MemoryLayout<Float>.size)
-    guard buffers[0].mDataByteSize % bytesPerFrame == 0 else {
-      return kAudio_ParamError
-    }
-    let frameCount = buffers[0].mDataByteSize / bytesPerFrame
-    guard frameCount <= Self.maximumFramesPerSlice else {
-      return kAudio_ParamError
-    }
-    let samples = data.assumingMemoryBound(to: Float.self)
+
+    let byteCount =
+      frameCount * Self.channelCount * UInt32(MemoryLayout<Float>.size)
+    var inputBufferList = AudioBufferList(
+      mNumberBuffers: 1,
+      mBuffers: AudioBuffer(
+        mNumberChannels: Self.channelCount,
+        mDataByteSize: byteCount,
+        mData: sourceCaptureBuffer
+      )
+    )
+    let status = AudioUnitRender(
+      sourceInputUnit,
+      actionFlags,
+      timestamp,
+      1,
+      frameCount,
+      &inputBufferList
+    )
+    guard status == noErr else { return status }
+
+    let samples = sourceCaptureBuffer.assumingMemoryBound(to: Float.self)
     _ = SRFloatRingBufferWrite(ringBuffer, samples, frameCount)
     return noErr
   }
@@ -286,6 +297,70 @@ public final class AudioRelayEngine: @unchecked Sendable {
     )
   }
 
+  private func configureSourceInputUnit(
+    _ unit: AudioUnit,
+    deviceID: AudioObjectID,
+    sampleRate: Double
+  ) throws {
+    var enabled: UInt32 = 1
+    var disabled: UInt32 = 0
+    try setProperty(
+      unit,
+      id: kAudioOutputUnitProperty_EnableIO,
+      scope: kAudioUnitScope_Input,
+      element: 1,
+      value: &enabled,
+      operation: "Enable virtual-device input"
+    )
+    try setProperty(
+      unit,
+      id: kAudioOutputUnitProperty_EnableIO,
+      scope: kAudioUnitScope_Output,
+      element: 0,
+      value: &disabled,
+      operation: "Disable virtual-device output"
+    )
+    var deviceID = deviceID
+    try setProperty(
+      unit,
+      id: kAudioOutputUnitProperty_CurrentDevice,
+      scope: kAudioUnitScope_Global,
+      element: 0,
+      value: &deviceID,
+      operation: "Select virtual input device"
+    )
+    var format = relayFormat(sampleRate: sampleRate)
+    try setProperty(
+      unit,
+      id: kAudioUnitProperty_StreamFormat,
+      scope: kAudioUnitScope_Output,
+      element: 1,
+      value: &format,
+      operation: "Set virtual-device input format"
+    )
+    var callback = AURenderCallbackStruct(
+      inputProc: speakerRouterInputCallback,
+      inputProcRefCon: Unmanaged.passUnretained(self).toOpaque()
+    )
+    try setProperty(
+      unit,
+      id: kAudioOutputUnitProperty_SetInputCallback,
+      scope: kAudioUnitScope_Global,
+      element: 0,
+      value: &callback,
+      operation: "Install virtual-device input callback"
+    )
+    var maxFrames = Self.maximumFramesPerSlice
+    try setProperty(
+      unit,
+      id: kAudioUnitProperty_MaximumFramesPerSlice,
+      scope: kAudioUnitScope_Global,
+      element: 0,
+      value: &maxFrames,
+      operation: "Set virtual-device input frame capacity"
+    )
+  }
+
   private func relayFormat(sampleRate: Double) -> AudioStreamBasicDescription {
     let bytesPerFrame = Self.channelCount * UInt32(MemoryLayout<Float>.size)
     return AudioStreamBasicDescription(
@@ -348,18 +423,20 @@ public final class AudioRelayEngine: @unchecked Sendable {
   }
 }
 
-private func speakerRouterSourceIOProc(
-  _ deviceID: AudioObjectID,
-  _ now: UnsafePointer<AudioTimeStamp>,
-  _ inputData: UnsafePointer<AudioBufferList>,
-  _ inputTime: UnsafePointer<AudioTimeStamp>,
-  _ outputData: UnsafeMutablePointer<AudioBufferList>,
-  _ outputTime: UnsafePointer<AudioTimeStamp>,
-  _ clientData: UnsafeMutableRawPointer?
+private func speakerRouterInputCallback(
+  _ refCon: UnsafeMutableRawPointer,
+  _ actionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
+  _ timestamp: UnsafePointer<AudioTimeStamp>,
+  _ busNumber: UInt32,
+  _ frameCount: UInt32,
+  _ bufferList: UnsafeMutablePointer<AudioBufferList>?
 ) -> OSStatus {
-  guard let clientData else { return kAudio_ParamError }
-  let engine = Unmanaged<AudioRelayEngine>.fromOpaque(clientData).takeUnretainedValue()
-  return engine.capture(inputData: inputData)
+  let engine = Unmanaged<AudioRelayEngine>.fromOpaque(refCon).takeUnretainedValue()
+  return engine.captureFromInputUnit(
+    actionFlags: actionFlags,
+    timestamp: timestamp,
+    frameCount: frameCount
+  )
 }
 
 private func speakerRouterOutputCallback(
