@@ -1,0 +1,14 @@
+/*
+See the LICENSE.txt file for this sample’s licensing information.
+
+Abstract:
+Localized strings displayed by the device.
+*/
+
+DeviceName = "SpeakerRouter";
+InputStreamName = "SpeakerRouter Relay Input";
+OutputStreamName = "SpeakerRouter System Output";
+ManufacturerName = "SpeakerRouter";
+MasterElementName = "Master";
+LeftElementName = "Left";
+RightElementName = "Right";
