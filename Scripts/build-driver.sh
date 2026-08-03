@@ -5,6 +5,7 @@ set -euo pipefail
 script_dir=${0:A:h}
 project_dir=${script_dir:h}
 source_dir="${project_dir}/Driver/SpeakerRouterHAL"
+audio_support_dir="${project_dir}/Sources/SpeakerRouterAudioSupport"
 output_root=${1:-"${project_dir}/DerivedData/ManualBuild"}
 bundle="${output_root}/SpeakerRouterHAL.driver"
 contents="${bundle}/Contents"
@@ -21,7 +22,9 @@ xcrun clang \
   -arch x86_64 \
   -mmacosx-version-min=10.13 \
   -bundle \
+  -I "${audio_support_dir}/include" \
   "${source_dir}/NullAudio.c" \
+  "${audio_support_dir}/SRSharedAudioTransport.c" \
   -framework CoreAudio \
   -framework CoreFoundation \
   -framework IOKit \

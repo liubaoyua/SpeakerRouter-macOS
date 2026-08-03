@@ -8,8 +8,10 @@ Changes for SpeakerRouter:
 - unique bundle, box, model, and device identifiers;
 - SpeakerRouter product and localized device names;
 - safe default output volume with a 0 dB maximum;
-- a preallocated lock-free stereo ring buffer that loops the HAL output mix into
-  the input stream consumed by the relay app.
+- the sample driver's established full-duplex object model, with an inert input
+  stream retained for HAL compatibility;
+- a declared `CFString` custom property and private shared-memory stereo ring
+  that transfer the HAL output mix without the app opening an input device.
 
 Build without installation:
 

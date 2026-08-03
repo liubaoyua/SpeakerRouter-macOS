@@ -15,12 +15,13 @@ A minimal user-space driver.
 
 //	System Includes
 #include <CoreAudio/AudioServerPlugIn.h>
+#include "SRSharedAudioTransport.h"
 #include <dispatch/dispatch.h>
 #include <mach/mach_time.h>
-#include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/syslog.h>
 
@@ -87,16 +88,14 @@ A minimal user-space driver.
 //	- a device
 //		- supports 44100 and 48000 sample rates
 //		- provides a rate scalar of 1.0 via hard coding
-//	- a single input stream
-//		- supports 2 channels of 32 bit float LPCM samples
-//		- reads the system mix written to the output stream
+//	- a single inert input stream retained for HAL object-model compatibility
+//		- supports 2 channels of 32 bit float LPCM silence
 //	- a single output stream
 //		- supports 2 channels of 32 bit float LPCM samples
-//		- writes into a lock-free loopback ring buffer
+//		- writes into the app's shared-memory ring buffer
 //	- controls
-//		- master input volume
+//		- master input volume and mute, retained for object-model compatibility
 //		- master output volume
-//		- master input mute
 //		- master output mute
 
 
@@ -148,15 +147,56 @@ static UInt64								gDevice_NumberTimeStamps		= 0;
 static Float64								gDevice_AnchorSampleTime		= 0.0;
 static UInt64								gDevice_AnchorHostTime			= 0;
 
-// The HAL delivers a single mixed output stream. The relay app consumes the matching input
-// stream. Both callbacks are real-time code, so the bridge is a preallocated ring buffer with
-// no locks or allocation. Buffer locations are derived from the device timeline supplied by
-// Core Audio. This is important because multiple clients may read the same input concurrently;
-// a shared sequential read position would let one client consume another client's audio.
-static const UInt64						kLoopbackBufferFrames			= 65536;
-static Float32							gLoopbackBuffer[65536 * 2];
-static _Atomic UInt64					gLoopbackLatestWrittenEnd		= 0;
-static _Atomic bool						gLoopbackHasWrittenData			= false;
+// The driver writes the fully mixed virtual output directly into a shared ring buffer created
+// by SpeakerRouterApp. The app reads this memory from its physical-output callback and never
+// opens a Core Audio input device, so macOS does not treat routing as microphone capture.
+static _Atomic(SRSharedAudioBuffer*)		gSharedAudioBuffer				= NULL;
+static SRSharedAudioMapping*				gSharedAudioMapping				= NULL;
+
+typedef struct RetiredSharedAudioMapping
+{
+	SRSharedAudioMapping*					mapping;
+	struct RetiredSharedAudioMapping*	next;
+} RetiredSharedAudioMapping;
+
+static RetiredSharedAudioMapping*		gRetiredSharedAudioMappings		= NULL;
+
+static void NullAudio_ReplaceSharedAudioMapping(SRSharedAudioMapping* inNewMapping)
+{
+	RetiredSharedAudioMapping* theRetired = NULL;
+	if(gSharedAudioMapping != NULL)
+	{
+		theRetired = calloc(1, sizeof(RetiredSharedAudioMapping));
+		if(theRetired != NULL)
+		{
+			theRetired->mapping = gSharedAudioMapping;
+			theRetired->next = gRetiredSharedAudioMappings;
+			gRetiredSharedAudioMappings = theRetired;
+		}
+	}
+	gSharedAudioMapping = inNewMapping;
+	atomic_store_explicit(
+		&gSharedAudioBuffer,
+		inNewMapping == NULL ? NULL : SRSharedAudioMappingGetBuffer(inNewMapping),
+		memory_order_release
+	);
+	// If allocating a retirement node fails, retain the old mapping for the lifetime of the
+	// driver process. Leaking a small mapping is safer than unmapping memory an IO callback may
+	// still be using.
+}
+
+static void NullAudio_CleanupRetiredSharedAudioMappings(void)
+{
+	RetiredSharedAudioMapping* theMapping = gRetiredSharedAudioMappings;
+	gRetiredSharedAudioMappings = NULL;
+	while(theMapping != NULL)
+	{
+		RetiredSharedAudioMapping* theNext = theMapping->next;
+		SRSharedAudioMappingDestroy(theMapping->mapping);
+		free(theMapping);
+		theMapping = theNext;
+	}
+}
 
 static bool									gStream_Input_IsActive			= true;
 static bool									gStream_Output_IsActive			= true;
@@ -1811,6 +1851,7 @@ static Boolean	NullAudio_HasDeviceProperty(AudioServerPlugInDriverRef inDriver, 
 		case kAudioObjectPropertyName:
 		case kAudioObjectPropertyManufacturer:
 		case kAudioObjectPropertyOwnedObjects:
+		case kAudioObjectPropertyCustomPropertyInfoList:
 		case kAudioDevicePropertyDeviceUID:
 		case kAudioDevicePropertyModelUID:
 		case kAudioDevicePropertyTransportType:
@@ -1825,6 +1866,7 @@ static Boolean	NullAudio_HasDeviceProperty(AudioServerPlugInDriverRef inDriver, 
 		case kAudioDevicePropertyZeroTimeStampPeriod:
 		case kAudioDevicePropertyIcon:
 		case kAudioDevicePropertyStreams:
+		case SRSharedAudioTransportPropertySelector:
 			theAnswer = true;
 			break;
 			
@@ -1874,6 +1916,7 @@ static OSStatus	NullAudio_IsDevicePropertySettable(AudioServerPlugInDriverRef in
 		case kAudioObjectPropertyManufacturer:
 		case kAudioObjectPropertyElementName:
 		case kAudioObjectPropertyOwnedObjects:
+		case kAudioObjectPropertyCustomPropertyInfoList:
 		case kAudioDevicePropertyDeviceUID:
 		case kAudioDevicePropertyModelUID:
 		case kAudioDevicePropertyTransportType:
@@ -1897,6 +1940,7 @@ static OSStatus	NullAudio_IsDevicePropertySettable(AudioServerPlugInDriverRef in
 			break;
 		
 		case kAudioDevicePropertyNominalSampleRate:
+		case SRSharedAudioTransportPropertySelector:
 			*outIsSettable = true;
 			break;
 		
@@ -1970,6 +2014,10 @@ static OSStatus	NullAudio_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
 			};
 			break;
 
+		case kAudioObjectPropertyCustomPropertyInfoList:
+			*outDataSize = sizeof(AudioServerPlugInCustomPropertyInfo);
+			break;
+
 		case kAudioDevicePropertyDeviceUID:
 			*outDataSize = sizeof(CFStringRef);
 			break;
@@ -2018,7 +2066,7 @@ static OSStatus	NullAudio_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
 					break;
 					
 				case kAudioObjectPropertyScopeInput:
-					*outDataSize = 1 * sizeof(AudioObjectID);
+					*outDataSize = sizeof(AudioObjectID);
 					break;
 					
 				case kAudioObjectPropertyScopeOutput:
@@ -2061,6 +2109,10 @@ static OSStatus	NullAudio_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
 
 		case kAudioDevicePropertyIcon:
 			*outDataSize = sizeof(CFURLRef);
+			break;
+
+		case SRSharedAudioTransportPropertySelector:
+			*outDataSize = sizeof(CFStringRef);
 			break;
 
 		default:
@@ -2227,6 +2279,14 @@ static OSStatus	NullAudio_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			*outDataSize = theNumberItemsToFetch * sizeof(AudioObjectID);
 			break;
 
+		case kAudioObjectPropertyCustomPropertyInfoList:
+			FailWithAction(inDataSize < sizeof(AudioServerPlugInCustomPropertyInfo), theAnswer = kAudioHardwareBadPropertySizeError, Done, "NullAudio_GetDevicePropertyData: not enough space for custom property info");
+			((AudioServerPlugInCustomPropertyInfo*)outData)->mSelector = SRSharedAudioTransportPropertySelector;
+			((AudioServerPlugInCustomPropertyInfo*)outData)->mPropertyDataType = kAudioServerPlugInCustomPropertyDataTypeCFString;
+			((AudioServerPlugInCustomPropertyInfo*)outData)->mQualifierDataType = kAudioServerPlugInCustomPropertyDataTypeNone;
+			*outDataSize = sizeof(AudioServerPlugInCustomPropertyInfo);
+			break;
+
 		case kAudioDevicePropertyDeviceUID:
 			//	This is a CFString that is a persistent token that can identify the same
 			//	audio device across boot sessions. Note that two instances of the same
@@ -2353,13 +2413,12 @@ static OSStatus	NullAudio_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			switch(inAddress->mScope)
 			{
 				case kAudioObjectPropertyScopeGlobal:
-					//	global scope means return all streams
+					//	global scope means return both streams
 					if(theNumberItemsToFetch > 2)
 					{
 						theNumberItemsToFetch = 2;
 					}
 					
-					//	fill out the list with as many objects as requested
 					if(theNumberItemsToFetch > 0)
 					{
 						((AudioObjectID*)outData)[0] = kObjectID_Stream_Input;
@@ -2371,13 +2430,10 @@ static OSStatus	NullAudio_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 					break;
 					
 				case kAudioObjectPropertyScopeInput:
-					//	input scope means just the objects on the input side
 					if(theNumberItemsToFetch > 1)
 					{
 						theNumberItemsToFetch = 1;
 					}
-					
-					//	fill out the list with as many objects as requested
 					if(theNumberItemsToFetch > 0)
 					{
 						((AudioObjectID*)outData)[0] = kObjectID_Stream_Input;
@@ -2539,6 +2595,12 @@ static OSStatus	NullAudio_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 				*outDataSize = sizeof(CFURLRef);
 			}
 			break;
+
+		case SRSharedAudioTransportPropertySelector:
+			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "NullAudio_GetDevicePropertyData: not enough space for shared transport status");
+			*((CFStringRef*)outData) = CFSTR("");
+			*outDataSize = sizeof(CFStringRef);
+			break;
 			
 		default:
 			theAnswer = kAudioHardwareUnknownPropertyError;
@@ -2561,6 +2623,7 @@ static OSStatus	NullAudio_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_SetDevicePropertyData: bad driver reference");
 	FailWithAction(inAddress == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "NullAudio_SetDevicePropertyData: no address");
+	FailWithAction(inData == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "NullAudio_SetDevicePropertyData: no input data");
 	FailWithAction(outNumberPropertiesChanged == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "NullAudio_SetDevicePropertyData: no place to return the number of properties that changed");
 	FailWithAction(outChangedAddresses == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "NullAudio_SetDevicePropertyData: no place to return the properties that changed");
 	FailWithAction(inObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_SetDevicePropertyData: not the device object");
@@ -2595,6 +2658,30 @@ static OSStatus	NullAudio_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 				theOldSampleRate = *((const Float64*)inData);
 				theNewSampleRate = (UInt64)theOldSampleRate;
 				dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ gPlugIn_Host->RequestDeviceConfigurationChange(gPlugIn_Host, kObjectID_Device, theNewSampleRate, NULL); });
+			}
+			break;
+
+		case SRSharedAudioTransportPropertySelector:
+			FailWithAction(inDataSize != sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "NullAudio_SetDevicePropertyData: wrong shared transport token size");
+			{
+				CFStringRef theToken = *((const CFStringRef*)inData);
+				FailWithAction(theToken == NULL || CFGetTypeID(theToken) != CFStringGetTypeID(), theAnswer = kAudioHardwareIllegalOperationError, Done, "NullAudio_SetDevicePropertyData: invalid shared transport token type");
+				char theTokenBytes[SRSharedAudioTransportTokenCapacity] = {0};
+				FailWithAction(!CFStringGetCString(theToken, theTokenBytes, sizeof(theTokenBytes), kCFStringEncodingUTF8), theAnswer = kAudioHardwareIllegalOperationError, Done, "NullAudio_SetDevicePropertyData: invalid shared transport token encoding");
+				SRSharedAudioTransportConfiguration theConfiguration = {0};
+				FailWithAction(!SRSharedAudioTransportParseConfigurationToken(theTokenBytes, &theConfiguration), theAnswer = kAudioHardwareIllegalOperationError, Done, "NullAudio_SetDevicePropertyData: invalid shared transport token");
+				SRSharedAudioMapping* theNewMapping = NULL;
+				if(!SRSharedAudioTransportConfigurationIsDisconnect(&theConfiguration))
+				{
+					theNewMapping = SRSharedAudioMappingOpen(&theConfiguration);
+					FailWithAction(theNewMapping == NULL, theAnswer = kAudioHardwareUnspecifiedError, Done, "NullAudio_SetDevicePropertyData: could not map shared audio transport");
+				}
+				pthread_mutex_lock(&gPlugIn_StateMutex);
+				NullAudio_ReplaceSharedAudioMapping(theNewMapping);
+				pthread_mutex_unlock(&gPlugIn_StateMutex);
+				// This private handshake changes no externally observable device property. Reporting a
+				// property notification here makes the remote HAL proxy reconcile the whole object tree.
+				*outNumberPropertiesChanged = 0;
 			}
 			break;
 		
@@ -4029,9 +4116,6 @@ static OSStatus	NullAudio_StartIO(AudioServerPlugInDriverRef inDriver, AudioObje
 		gDevice_NumberTimeStamps = 0;
 		gDevice_AnchorSampleTime = 0;
 		gDevice_AnchorHostTime = mach_absolute_time();
-		memset(gLoopbackBuffer, 0, sizeof(gLoopbackBuffer));
-		atomic_store_explicit(&gLoopbackLatestWrittenEnd, 0, memory_order_relaxed);
-		atomic_store_explicit(&gLoopbackHasWrittenData, false, memory_order_release);
 	}
 	else
 	{
@@ -4073,6 +4157,7 @@ static OSStatus	NullAudio_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjec
 	{
 		//	We need to stop the hardware, which in this case means that there's nothing to do.
 		gDevice_IOIsRunning = 0;
+		NullAudio_CleanupRetiredSharedAudioMappings();
 	}
 	else
 	{
@@ -4142,8 +4227,8 @@ Done:
 
 static OSStatus	NullAudio_WillDoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, UInt32 inClientID, UInt32 inOperationID, Boolean* outWillDo, Boolean* outWillDoInPlace)
 {
-	//	This method returns whether or not the device will do a given IO operation. For this device,
-	//	we only support reading input data and writing output data.
+	//	Keep the sample driver's mature full-duplex object model for HAL compatibility. The app
+	//	receives the mixed output through shared memory and never opens this input stream.
 	
 	#pragma unused(inClientID)
 	
@@ -4163,7 +4248,7 @@ static OSStatus	NullAudio_WillDoIOOperation(AudioServerPlugInDriverRef inDriver,
 			willDo = true;
 			willDoInPlace = true;
 			break;
-			
+
 		case kAudioServerPlugInIOOperationWriteMix:
 			willDo = true;
 			willDoInPlace = true;
@@ -4205,13 +4290,10 @@ Done:
 
 static OSStatus	NullAudio_DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, AudioObjectID inStreamObjectID, UInt32 inClientID, UInt32 inOperationID, UInt32 inIOBufferFrameSize, const AudioServerPlugInIOCycleInfo* inIOCycleInfo, void* ioMainBuffer, void* ioSecondaryBuffer)
 {
-	//	Bridge the mixed output stream to the input stream consumed by SpeakerRouterApp. The
-	//	callbacks may execute on different real-time threads, so only atomic state and bounded
-	//	memory copies are allowed here. Core Audio's device timeline is the shared coordinate
-	//	system: output sample time selects where to write and input sample time selects where to
-	//	read. Each input client can therefore read independently without consuming global state.
+	//	Write the fully mixed virtual output into the app's preallocated shared ring. The app's
+	//	physical-output callback is the sole reader. No locks or allocation occur on this path.
 	
-	#pragma unused(inClientID, ioSecondaryBuffer)
+	#pragma unused(inClientID, inIOCycleInfo, ioSecondaryBuffer)
 	
 	//	declare the local variables
 	OSStatus theAnswer = 0;
@@ -4220,94 +4302,24 @@ static OSStatus	NullAudio_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_DoIOOperation: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_DoIOOperation: bad device ID");
 	FailWithAction((inStreamObjectID != kObjectID_Stream_Input) && (inStreamObjectID != kObjectID_Stream_Output), theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_DoIOOperation: bad stream ID");
-	FailWithAction(inIOBufferFrameSize > kLoopbackBufferFrames, theAnswer = kAudioHardwareBadPropertySizeError, Done, "NullAudio_DoIOOperation: IO buffer exceeds loopback capacity");
-	FailWithAction(inIOCycleInfo == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "NullAudio_DoIOOperation: missing IO cycle info");
 	FailWithAction(ioMainBuffer == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "NullAudio_DoIOOperation: missing main buffer");
 
-	const UInt64 theFrameCount = inIOBufferFrameSize;
-	const UInt64 theSampleCount = theFrameCount * 2;
 	Float32* theSamples = (Float32*)ioMainBuffer;
 
 	if(inOperationID == kAudioServerPlugInIOOperationWriteMix)
 	{
-		const AudioTimeStamp* theOutputTime = &inIOCycleInfo->mOutputTime;
-		if(((theOutputTime->mFlags & kAudioTimeStampSampleTimeValid) == 0) ||
-			!isfinite(theOutputTime->mSampleTime) ||
-			(theOutputTime->mSampleTime < 0) ||
-			(theOutputTime->mSampleTime > ((Float64)UINT64_MAX - (Float64)theFrameCount)))
-		{
-			goto Done;
-		}
-
-		UInt64 theWriteFrame = (UInt64)theOutputTime->mSampleTime;
-		UInt64 theStartFrame = theWriteFrame % kLoopbackBufferFrames;
-		UInt64 theFirstFrames = kLoopbackBufferFrames - theStartFrame;
-		if(theFirstFrames > theFrameCount)
-		{
-			theFirstFrames = theFrameCount;
-		}
-		memcpy(
-			&gLoopbackBuffer[theStartFrame * 2],
-			theSamples,
-			theFirstFrames * 2 * sizeof(Float32)
+		SRSharedAudioBuffer* theSharedBuffer = atomic_load_explicit(
+			&gSharedAudioBuffer,
+			memory_order_acquire
 		);
-		if(theFirstFrames < theFrameCount)
+		if(theSharedBuffer != NULL)
 		{
-			memcpy(
-				gLoopbackBuffer,
-				&theSamples[theFirstFrames * 2],
-				(theFrameCount - theFirstFrames) * 2 * sizeof(Float32)
-			);
+			SRSharedAudioBufferWrite(theSharedBuffer, theSamples, inIOBufferFrameSize);
 		}
-		atomic_store_explicit(&gLoopbackLatestWrittenEnd, theWriteFrame + theFrameCount, memory_order_release);
-		atomic_store_explicit(&gLoopbackHasWrittenData, true, memory_order_release);
 	}
 	else if(inOperationID == kAudioServerPlugInIOOperationReadInput)
 	{
-		const AudioTimeStamp* theInputTime = &inIOCycleInfo->mInputTime;
-		if(((theInputTime->mFlags & kAudioTimeStampSampleTimeValid) == 0) ||
-			!isfinite(theInputTime->mSampleTime) ||
-			(theInputTime->mSampleTime < 0) ||
-			(theInputTime->mSampleTime > ((Float64)UINT64_MAX - (Float64)theFrameCount)) ||
-			!atomic_load_explicit(&gLoopbackHasWrittenData, memory_order_acquire))
-		{
-			memset(theSamples, 0, theSampleCount * sizeof(Float32));
-			goto Done;
-		}
-
-		UInt64 theReadFrame = (UInt64)theInputTime->mSampleTime;
-		UInt64 theReadEnd = theReadFrame + theFrameCount;
-		UInt64 theLatestWrittenEnd = atomic_load_explicit(&gLoopbackLatestWrittenEnd, memory_order_acquire);
-		bool theReadIsAhead = theReadEnd > theLatestWrittenEnd;
-		bool theReadWasOverwritten = (theLatestWrittenEnd > kLoopbackBufferFrames) &&
-			(theReadFrame < (theLatestWrittenEnd - kLoopbackBufferFrames));
-
-		if(theReadIsAhead || theReadWasOverwritten)
-		{
-			memset(theSamples, 0, theSampleCount * sizeof(Float32));
-		}
-		else
-		{
-			UInt64 theStartFrame = theReadFrame % kLoopbackBufferFrames;
-			UInt64 theFirstFrames = kLoopbackBufferFrames - theStartFrame;
-			if(theFirstFrames > theFrameCount)
-			{
-				theFirstFrames = theFrameCount;
-			}
-			memcpy(
-				theSamples,
-				&gLoopbackBuffer[theStartFrame * 2],
-				theFirstFrames * 2 * sizeof(Float32)
-			);
-			if(theFirstFrames < theFrameCount)
-			{
-				memcpy(
-					&theSamples[theFirstFrames * 2],
-					gLoopbackBuffer,
-					(theFrameCount - theFirstFrames) * 2 * sizeof(Float32)
-				);
-			}
-		}
+		memset(theSamples, 0, (size_t)inIOBufferFrameSize * 2 * sizeof(Float32));
 	}
 
 Done:

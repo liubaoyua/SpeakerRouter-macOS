@@ -6,26 +6,32 @@
 macOS applications and system sounds
               |
               v
-SpeakerRouter virtual output (system default output + system-sound output)
+SpeakerRouter virtual output (system default + system sounds)
               |
               v
-lock-free ring buffer -> gain/mute -> format conversion -> selected physical output
+private shared memory -> gain/mute -> output AUHAL -> selected physical output
 ```
 
 The virtual device exposes standard primary-volume and mute controls. This lets
 macOS handle media keys and draw its native volume HUD. The app observes those
 controls and maps them to a square-law software gain for useful low-volume
-resolution; the physical device stays outside the
-system-default role. The app never changes the default input device.
+resolution; the physical device stays outside the system-default role. The app
+never opens or changes an input device, so routing does not use the macOS
+microphone-capture path.
 
 ## Components
 
 ### SpeakerRouterHAL.driver
 
 A minimal C `AudioServerPlugIn` based on Apple's current virtual-device sample.
-It publishes one two-channel, 32-bit floating-point device with 44.1 and 48 kHz
-formats, primary volume, and mute controls. Its output stream is looped back to
-an input stream consumed only by the relay app.
+It keeps the sample driver's established full-duplex object model for HAL
+compatibility, with two-channel 32-bit floating-point streams at 44.1 and 48 kHz
+plus primary volume and mute controls. The input stream is inert and returns
+silence; SpeakerRouterApp never opens it. The output callback writes the system
+mix into a single-producer/single-consumer ring in a shared memory mapping
+created by the app. A declared `CFString` custom device property carries a
+one-time random mapping token to the remote driver service; the app unlinks the
+name after the driver maps it.
 
 The first implementation is installed under `/Library/Audio/Plug-Ins/HAL` for
 personal use. It must be universal (`arm64` and `x86_64`) and signed before it
@@ -33,26 +39,23 @@ is treated as distributable; ad-hoc local development is acceptable initially.
 
 ### AudioRelayEngine
 
-Uses `AudioDeviceCreateIOProcID` to consume the virtual-device input and one
-AUHAL audio unit for the physical-device output. The direct device callback is
-required because an input-only AUHAL client did not start virtual-driver input
-delivery on the current macOS 26.3 system.
-The real-time callbacks perform no allocation, file IO, logging, locks, or UI
-work. A preallocated single-producer/single-consumer ring buffer crosses the two
-device clock domains. The app requests 48 kHz from the virtual device; the
-current relay format is interleaved stereo 32-bit float, and output AUHAL
-negotiates that client format with each selected device. Explicit sample-rate
-conversion outside AUHAL is not yet implemented.
+Creates the shared transport, attaches it to the virtual driver, and owns one
+AUHAL audio unit for the physical-device output. The app has no input audio unit
+or input device callback. Both the driver's writer and the app's physical-output
+callback perform no allocation, file IO, logging, locks, or UI work. The app
+requests 48 kHz from the virtual device; the relay format is interleaved stereo
+32-bit float, and output AUHAL negotiates that client format with each selected
+device. Explicit sample-rate conversion outside AUHAL is not yet implemented.
 
 An output switch follows this sequence:
 
 1. Ramp current software gain to silence.
-2. Stop and destroy the virtual-device IO procedure and physical-output AUHAL.
-3. Reset the ring buffer and bind a new input IO procedure and output AUHAL.
-4. Start the virtual input IO procedure and selected physical output.
+2. Stop and destroy the physical-output AUHAL and disconnect the old mapping.
+3. Create and attach a fresh shared mapping, then configure the new output AUHAL.
+4. Start the selected physical output before making the virtual device default.
 5. Ramp to the new device's remembered gain.
 
-Underruns output silence and increment a non-real-time diagnostic counter.
+Underruns output silence and increment a shared diagnostic counter.
 
 ### OutputDeviceRepository
 

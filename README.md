@@ -49,17 +49,20 @@ For command-line development, build the driver first and run
 the same guarded helper, which only replaces or removes a bundle whose identifier
 is exactly `com.liubaoyuan.SpeakerRouterHAL`.
 
-SpeakerRouter is one full-duplex Core Audio device: it appears once under Output
-and once under Input. The input stream is how the relay receives the system mix;
-it is not an additional installed driver. Unused data-source selectors from the
-upstream sample driver are intentionally not exposed.
+SpeakerRouter keeps the sample driver's established full-duplex Core Audio
+object model for HAL compatibility, so the same device appears once under Output
+and once under Input. The app never opens that input stream: the driver writes
+the system mix into a private shared-memory ring and the app renders it to the
+selected physical output. The shared-memory name is random and is unlinked as
+soon as the driver maps it. The app therefore does not request microphone access
+or trigger macOS's recording indicator. Unused data-source selectors from the
+upstream sample driver are not exposed.
 
-The app verifies routing health from live capture and render frame counters. If
-both callbacks stop advancing after an audio-service restart, SpeakerRouter
-automatically tears down the stale Core Audio objects and rebuilds the route.
-It also keeps a silent output client attached to the virtual device so existing
-players cannot leave the system-mix writer dormant after the default device
-changes.
+The app verifies relay liveness from the physical render callback and records
+driver capture, rendered-signal, and underflow counters in its diagnostics. A
+silent virtual output is treated as idle rather than failed. If the physical
+render callback stalls after an audio-service restart, SpeakerRouter tears down
+the stale Core Audio objects and rebuilds the route.
 
 Launch-at-login is registered only after `SpeakerRouter.app` has been copied
 into `/Applications`; development builds under `DerivedData` deliberately do

@@ -1,5 +1,4 @@
 import AppKit
-import AVFoundation
 import CoreAudio
 import ServiceManagement
 import SpeakerRouterCore
@@ -66,7 +65,6 @@ final class RouterViewModel: ObservableObject {
   @Published private(set) var routeStatus = "正在检查音频设备…"
   @Published private(set) var launchAtLoginEnabled = false
   @Published private(set) var driverState: DriverInstallationState = .checking
-  @Published private(set) var microphoneAccessDenied = false
   @Published var lastError: String?
 
   private let repository = CoreAudioDeviceRepository()
@@ -83,7 +81,7 @@ final class RouterViewModel: ObservableObject {
   private var previousRelayStatistics: AudioRelayStatistics?
   private var stalledRelayHealthChecks = 0
   private var routeRecoveryInProgress = false
-  private var audioInputAuthorization = AudioInputAuthorization.checking
+  private var failedRouteAttempt: String?
   private var liveDevices: [OutputDevice] = []
   private var state: RoutingState
   private var virtualDeviceID: AudioObjectID?
@@ -110,7 +108,6 @@ final class RouterViewModel: ObservableObject {
     Self.shared = self
     refreshDriverState()
     configureLaunchAtLogin()
-    configureAudioInputAuthorization()
     refresh()
     startDeviceWatcher()
     relayHealthTimer = Timer.scheduledTimer(
@@ -130,14 +127,17 @@ final class RouterViewModel: ObservableObject {
   }
 
   func refresh() {
-    do {
-      applyDeviceSnapshot(.success(try repository.outputDevices()))
-    } catch {
-      lastError = String(describing: error)
+    let repository = repository
+    Task { [weak self] in
+      let result = await Task.detached(priority: .userInitiated) {
+        Result { try repository.outputDevices() }
+      }.value
+      self?.applyDeviceSnapshot(result)
     }
   }
 
   func select(_ uid: String) {
+    failedRouteAttempt = nil
     resetRelayHealthTracking()
     state.selectManually(uid: uid, discovered: liveDevices)
     persistAndPublish()
@@ -145,6 +145,7 @@ final class RouterViewModel: ObservableObject {
   }
 
   func useAutomaticRouting() {
+    failedRouteAttempt = nil
     resetRelayHealthTracking()
     state.returnToAutomaticRouting()
     persistAndPublish()
@@ -152,6 +153,7 @@ final class RouterViewModel: ObservableObject {
   }
 
   func move(_ uid: String, offset: Int) {
+    failedRouteAttempt = nil
     resetRelayHealthTracking()
     guard let current = state.preferences.firstIndex(where: { $0.uid == uid }) else {
       return
@@ -215,15 +217,6 @@ final class RouterViewModel: ObservableObject {
     }
   }
 
-  func openMicrophonePrivacySettings() {
-    guard
-      let url = URL(
-        string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
-      )
-    else { return }
-    NSWorkspace.shared.open(url)
-  }
-
   func installOrUpdateDriver() {
     changeDriver(.install)
   }
@@ -244,7 +237,11 @@ final class RouterViewModel: ObservableObject {
 
   private func applyDeviceSnapshot(_ result: Result<[OutputDevice], Error>) {
     do {
-      liveDevices = try result.get()
+      let snapshot = try result.get()
+      if snapshot.map(\.uid) != liveDevices.map(\.uid) {
+        failedRouteAttempt = nil
+      }
+      liveDevices = snapshot
       state.reconcile(with: liveDevices)
       updatePublishedState()
       try store.save(state)
@@ -269,18 +266,7 @@ final class RouterViewModel: ObservableObject {
       routeStatus = "实时音频引擎初始化失败"
       return
     }
-    guard audioInputAuthorization == .authorized else {
-      volumeWatcher.stop()
-      guardCoordinator.stopCleanly()
-      relayEngine.stop()
-      restoreFallbackPhysicalOutput()
-      virtualDeviceID = nil
-      activePhysicalDeviceUID = nil
-      resetRelayHealthTracking()
-      routeStatus = audioInputAuthorization.routeStatus
-      return
-    }
-
+    var routeAttempt: String?
     do {
       guard
         let virtualID = try systemController.deviceID(
@@ -309,6 +295,12 @@ final class RouterViewModel: ObservableObject {
         return
       }
 
+      routeAttempt = "\(virtualID):\(selectedUID)"
+      guard failedRouteAttempt != routeAttempt else {
+        routeStatus = "音频路由启动失败，等待设备变化或手动重试"
+        return
+      }
+
       if activePhysicalDeviceUID != selectedUID || !relayEngine.isRunning {
         let previousDefault = try systemController.defaultOutputDeviceID()
         if previousDefault != virtualID,
@@ -321,16 +313,17 @@ final class RouterViewModel: ObservableObject {
         let volumeScalar = state.volume(for: selectedUID)
         try systemController.setOutputVolume(Float(volumeScalar), of: virtualID)
         try systemController.setOutputMute(false, of: virtualID)
-        try systemController.setDefaultOutputs(to: virtualID)
         try relayEngine.start(
-          sourceDeviceID: virtualID,
+            virtualDeviceID: virtualID,
           destinationDeviceID: destination.objectID,
           gain: VolumeCurve.gain(for: volumeScalar)
         )
+        try systemController.setDefaultOutputs(to: virtualID)
         resetRelayHealthTracking(baseline: relayEngine.statistics())
         state.lastUsablePhysicalDeviceUID = selectedUID
         activePhysicalDeviceUID = selectedUID
         virtualDeviceID = virtualID
+        failedRouteAttempt = nil
         try store.save(state)
 
         try volumeWatcher.start(deviceID: virtualID) { [weak self] level in
@@ -348,6 +341,7 @@ final class RouterViewModel: ObservableObject {
       }
       routeStatus = "正在输出到 \(destination.name)"
     } catch {
+      failedRouteAttempt = routeAttempt
       guardCoordinator.stopCleanly()
       volumeWatcher.stop()
       relayEngine.stop()
@@ -403,32 +397,6 @@ final class RouterViewModel: ObservableObject {
     }
   }
 
-  private func configureAudioInputAuthorization() {
-    switch AVCaptureDevice.authorizationStatus(for: .audio) {
-    case .authorized:
-      audioInputAuthorization = .authorized
-      microphoneAccessDenied = false
-    case .notDetermined:
-      audioInputAuthorization = .requesting
-      microphoneAccessDenied = false
-      AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-        Task { @MainActor in
-          guard let self else { return }
-          self.audioInputAuthorization = granted ? .authorized : .denied
-          self.microphoneAccessDenied = !granted
-          self.resetRelayHealthTracking()
-          self.refresh()
-        }
-      }
-    case .denied, .restricted:
-      audioInputAuthorization = .denied
-      microphoneAccessDenied = true
-    @unknown default:
-      audioInputAuthorization = .denied
-      microphoneAccessDenied = true
-    }
-  }
-
   private func refreshDriverState() {
     driverState = driverManager.currentState()
   }
@@ -478,60 +446,55 @@ final class RouterViewModel: ObservableObject {
     restoreFallbackPhysicalOutput()
     virtualDeviceID = nil
     activePhysicalDeviceUID = nil
+    failedRouteAttempt = nil
     resetRelayHealthTracking()
     routeStatus = "已暂停路由，等待驱动操作"
   }
 
   private func recoverAfterDriverChange(_ action: DriverManagerAction) async throws {
     let expectsInstalledDriver = action == .install
-    var lastRecoveryError: Error?
     let recoveryDeadline = Date().addingTimeInterval(10)
+    var driverIsReady = false
 
     while Date() < recoveryDeadline {
-      do {
-        let virtualID = try systemController.deviceID(
-          forUID: CoreAudioSystemController.speakerRouterDeviceUID
-        )
-        let driverIsReady = expectsInstalledDriver ? virtualID != nil : virtualID == nil
-        guard driverIsReady else {
-          try await Task.sleep(for: .milliseconds(250))
-          continue
-        }
-
-        let snapshot = try repository.outputDevices()
-        refreshDriverState()
-        startDeviceWatcher()
-        applyDeviceSnapshot(.success(snapshot))
-
-        if !expectsInstalledDriver {
-          return
-        }
-        if let relayEngine, relayEngine.isRunning,
-          let virtualDeviceID,
-          try systemController.defaultOutputDeviceID() == virtualDeviceID
-        {
-          let baseline = relayEngine.statistics()
-          try await Task.sleep(for: .milliseconds(750))
-          let current = relayEngine.statistics()
-          if current.callbacksAdvanced(since: baseline) {
-            resetRelayHealthTracking(baseline: current)
-            return
-          }
-          lastRecoveryError = RelayCallbacksStalledError()
-          tearDownStalledRelay()
-        }
-      } catch {
-        lastRecoveryError = error
+      let virtualID = try systemController.deviceID(
+        forUID: CoreAudioSystemController.speakerRouterDeviceUID
+      )
+      driverIsReady = expectsInstalledDriver ? virtualID != nil : virtualID == nil
+      if driverIsReady {
+        break
       }
       try await Task.sleep(for: .milliseconds(250))
     }
 
+    guard driverIsReady else {
+      throw DriverRecoveryError(underlyingDescription: "CoreAudio 未在 10 秒内刷新驱动状态")
+    }
+
+    let snapshot = try repository.outputDevices()
     refreshDriverState()
     startDeviceWatcher()
-    refresh()
-    throw DriverRecoveryError(
-      underlyingDescription: lastRecoveryError.map(String.init(describing:))
-    )
+    applyDeviceSnapshot(.success(snapshot))
+
+    guard expectsInstalledDriver else { return }
+    guard let relayEngine, relayEngine.isRunning,
+      let virtualDeviceID,
+      try systemController.defaultOutputDeviceID() == virtualDeviceID
+    else {
+      throw DriverRecoveryError(underlyingDescription: lastError ?? "音频链路启动失败")
+    }
+
+    let baseline = relayEngine.statistics()
+    try await Task.sleep(for: .milliseconds(750))
+    let current = relayEngine.statistics()
+    guard current.renderCallbackAdvanced(since: baseline) else {
+      failedRouteAttempt = "\(virtualDeviceID):\(selectedUID ?? "")"
+      tearDownStalledRelay()
+      throw DriverRecoveryError(
+        underlyingDescription: RelayRenderCallbackStalledError().localizedDescription
+      )
+    }
+    resetRelayHealthTracking(baseline: current)
   }
 
   private func startDeviceWatcher() {
@@ -567,7 +530,9 @@ final class RouterViewModel: ObservableObject {
       return
     }
 
-    if current.callbacksAdvanced(since: previousRelayStatistics) {
+    // No capture frames while the virtual output is silent is normal. The physical render
+    // callback is the always-running liveness signal for the relay itself.
+    if current.renderCallbackAdvanced(since: previousRelayStatistics) {
       self.previousRelayStatistics = current
       stalledRelayHealthChecks = 0
       return
@@ -580,6 +545,7 @@ final class RouterViewModel: ObservableObject {
     routeRecoveryInProgress = true
     routeStatus = "检测到音频转发停滞，正在自动恢复…"
     tearDownStalledRelay()
+    failedRouteAttempt = nil
     refresh()
     routeRecoveryInProgress = false
   }
@@ -606,13 +572,13 @@ final class RouterViewModel: ObservableObject {
   private func writeRelayDiagnostics() {
     guard let diagnosticsURL, let relayEngine else { return }
     let snapshot = RelayDiagnosticsSnapshot(
-      schemaVersion: 4,
+      schemaVersion: 5,
       updatedAt: Date(),
       processID: ProcessInfo.processInfo.processIdentifier,
       appVersion: Bundle.main.object(
         forInfoDictionaryKey: "CFBundleShortVersionString"
       ) as? String ?? "未知",
-      audioInputAuthorization: audioInputAuthorization.diagnosticsDescription,
+      audioTransport: "shared-memory",
       driverStatus: driverState.description,
       selectedDeviceUID: selectedUID,
       selectedDeviceName: devices.first(where: { $0.id == selectedUID })?.displayName,
@@ -646,45 +612,12 @@ private struct RelayDiagnosticsSnapshot: Codable {
   let updatedAt: Date
   let processID: Int32
   let appVersion: String
-  let audioInputAuthorization: String
+  let audioTransport: String
   let driverStatus: String
   let selectedDeviceUID: String?
   let selectedDeviceName: String?
   let routeStatus: String
   let statistics: AudioRelayStatistics
-}
-
-private enum AudioInputAuthorization: Equatable {
-  case checking
-  case requesting
-  case authorized
-  case denied
-
-  var routeStatus: String {
-    switch self {
-    case .checking:
-      return "正在检查音频输入权限…"
-    case .requesting:
-      return "等待允许麦克风权限（用于读取虚拟音频）"
-    case .authorized:
-      return "音频输入权限已允许"
-    case .denied:
-      return "麦克风权限未允许，无法读取虚拟音频"
-    }
-  }
-
-  var diagnosticsDescription: String {
-    switch self {
-    case .checking:
-      return "checking"
-    case .requesting:
-      return "requesting"
-    case .authorized:
-      return "authorized"
-    case .denied:
-      return "denied"
-    }
-  }
 }
 
 private struct DriverRecoveryError: LocalizedError {
@@ -698,9 +631,9 @@ private struct DriverRecoveryError: LocalizedError {
   }
 }
 
-private struct RelayCallbacksStalledError: LocalizedError {
+private struct RelayRenderCallbackStalledError: LocalizedError {
   var errorDescription: String? {
-    "音频回调没有产生新的捕获帧和渲染帧"
+    "物理输出音频回调没有产生新的渲染帧"
   }
 }
 
@@ -726,18 +659,6 @@ struct RouterMenuView: View {
       Text(model.routeStatus)
         .font(.caption)
         .foregroundStyle(.secondary)
-
-      if model.microphoneAccessDenied {
-        HStack {
-          Text("需要在“隐私与安全性 → 麦克风”中允许 SpeakerRouter")
-            .font(.caption)
-            .foregroundStyle(.orange)
-          Spacer()
-          Button("打开系统设置") {
-            model.openMicrophonePrivacySettings()
-          }
-        }
-      }
 
       if model.devices.isEmpty {
         ContentUnavailableView(

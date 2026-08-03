@@ -78,7 +78,7 @@ struct FloatRingBufferTests {
     #expect(output[6] == 0)
   }
 
-  @Test("Relay health requires both callbacks to advance")
+  @Test("Relay health remains valid while the virtual output is idle")
   func relayHealth() {
     let baseline = AudioRelayStatistics(
       capturedFrames: 100,
@@ -94,7 +94,14 @@ struct FloatRingBufferTests {
       nonSilentRenderedSamples: 0,
       underflowFrames: 0
     )
-    let captureOnly = AudioRelayStatistics(
+    let idleSource = AudioRelayStatistics(
+      capturedFrames: 100,
+      requestedRenderFrames: 200,
+      nonSilentCapturedSamples: 0,
+      nonSilentRenderedSamples: 0,
+      underflowFrames: 0
+    )
+    let stalledRender = AudioRelayStatistics(
       capturedFrames: 200,
       requestedRenderFrames: 100,
       nonSilentCapturedSamples: 0,
@@ -102,7 +109,8 @@ struct FloatRingBufferTests {
       underflowFrames: 0
     )
 
-    #expect(healthy.callbacksAdvanced(since: baseline))
-    #expect(!captureOnly.callbacksAdvanced(since: baseline))
+    #expect(healthy.renderCallbackAdvanced(since: baseline))
+    #expect(idleSource.renderCallbackAdvanced(since: baseline))
+    #expect(!stalledRender.renderCallbackAdvanced(since: baseline))
   }
 }
