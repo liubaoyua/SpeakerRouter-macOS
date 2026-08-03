@@ -9,11 +9,34 @@ struct SpeakerRouterApp: App {
   @NSApplicationDelegateAdaptor(RouterApplicationDelegate.self) private var appDelegate
   @StateObject private var model = RouterViewModel()
 
+  private static let menuBarIcon: NSImage? = {
+    guard
+      let url = Bundle.main.url(
+        forResource: "MenuBarIconTemplate",
+        withExtension: "png"
+      ),
+      let image = NSImage(contentsOf: url)
+    else {
+      return nil
+    }
+    image.isTemplate = true
+    image.size = NSSize(width: 18, height: 18)
+    return image
+  }()
+
   var body: some Scene {
     MenuBarExtra {
       RouterMenuView(model: model)
     } label: {
-      Label("SpeakerRouter", systemImage: "speaker.wave.2.fill")
+      Label {
+        Text("SpeakerRouter")
+      } icon: {
+        if let menuBarIcon = Self.menuBarIcon {
+          Image(nsImage: menuBarIcon)
+        } else {
+          Image(systemName: "speaker.wave.2.fill")
+        }
+      }
     }
     .menuBarExtraStyle(.window)
   }
