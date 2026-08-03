@@ -9,18 +9,50 @@ struct SpeakerRouterApp: App {
   @NSApplicationDelegateAdaptor(RouterApplicationDelegate.self) private var appDelegate
   @StateObject private var model = RouterViewModel()
 
-  private static let menuBarIcon: NSImage? = {
-    guard
-      let url = Bundle.main.url(
-        forResource: "MenuBarIconTemplate",
-        withExtension: "png"
-      ),
-      let image = NSImage(contentsOf: url)
-    else {
-      return nil
+  private static let menuBarIcon: NSImage = {
+    let image = NSImage(size: NSSize(width: 22, height: 16), flipped: true) { _ in
+      NSColor.black.setFill()
+      NSColor.black.setStroke()
+
+      NSBezierPath(
+        roundedRect: NSRect(x: 0.5, y: 6, width: 3.7, height: 4),
+        xRadius: 1,
+        yRadius: 1
+      ).fill()
+
+      let cone = NSBezierPath()
+      cone.move(to: NSPoint(x: 3.8, y: 6))
+      cone.line(to: NSPoint(x: 8, y: 2.5))
+      cone.line(to: NSPoint(x: 8, y: 13.5))
+      cone.line(to: NSPoint(x: 3.8, y: 10))
+      cone.close()
+      cone.fill()
+
+      let route = NSBezierPath()
+      route.move(to: NSPoint(x: 10.5, y: 3))
+      route.line(to: NSPoint(x: 13, y: 3))
+      route.curve(
+        to: NSPoint(x: 18.3, y: 8),
+        controlPoint1: NSPoint(x: 15.1, y: 3),
+        controlPoint2: NSPoint(x: 15.8, y: 6.2)
+      )
+      route.move(to: NSPoint(x: 10.5, y: 13))
+      route.line(to: NSPoint(x: 13, y: 13))
+      route.curve(
+        to: NSPoint(x: 18.3, y: 8),
+        controlPoint1: NSPoint(x: 15.1, y: 13),
+        controlPoint2: NSPoint(x: 15.8, y: 9.8)
+      )
+      route.line(to: NSPoint(x: 19.5, y: 8))
+      route.lineWidth = 2.2
+      route.lineCapStyle = .round
+      route.lineJoinStyle = .round
+      route.stroke()
+
+      NSBezierPath(ovalIn: NSRect(x: 18.5, y: 6.3, width: 3.4, height: 3.4)).fill()
+      return true
     }
     image.isTemplate = true
-    image.size = NSSize(width: 18, height: 18)
     return image
   }()
 
@@ -31,11 +63,7 @@ struct SpeakerRouterApp: App {
       Label {
         Text("SpeakerRouter")
       } icon: {
-        if let menuBarIcon = Self.menuBarIcon {
-          Image(nsImage: menuBarIcon)
-        } else {
-          Image(systemName: "speaker.wave.2.fill")
-        }
+        Image(nsImage: Self.menuBarIcon)
       }
     }
     .menuBarExtraStyle(.window)
