@@ -32,6 +32,28 @@ The App deliberately blocks repeated attempts for the same failed route until a
 device changes or the user explicitly retries, preventing a Core Audio property
 reconciliation loop.
 
+## AirPods audio is delayed or continues after pause
+
+Version 0.6.0 and driver 0.5.0 add clock-drift compensation and downstream
+latency reporting. Update both components; an older installed driver cannot
+publish the physical destination latency. Reconnect the AirPods after updating
+if macOS still has the previous Bluetooth route cached.
+
+## AirPods removal does not pause or reinsertion does not resume
+
+1. In System Settings > Privacy & Security > Bluetooth, allow SpeakerRouter.
+2. Confirm the selected physical output is an AirPods device; monitoring stops
+   for every other output.
+3. SpeakerRouter resumes only playback that it confirmed was playing and then
+   paused on removal. Media that was already paused stays paused.
+4. The placement advertisement is not a public Apple API. An unsupported model
+   safely continues routing audio without automatic media control; include the
+   AirPods model and firmware version in a bug report.
+5. Build 24 and later determine recent playback from the virtual audio producer.
+   Build 23 can crash on removal because its private playback-state query is
+   rejected by current macOS releases. Build 25 also retries Pause once for
+   clients that briefly acknowledge the first command and immediately resume.
+
 ## Safe diagnostic information for bug reports
 
 Include:

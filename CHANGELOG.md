@@ -2,6 +2,24 @@
 
 All notable changes are documented in this file.
 
+## 0.6.0 - 2026-08-04
+
+- Added bounded-latency clock-drift compensation for independent virtual and
+  physical output clocks.
+- Discard stale multi-second audio backlog and smoothly interpolate the
+  occasional extra or repeated source frame.
+- Report the physical destination and relay presentation latency through the
+  virtual output so media clients can maintain audio/video synchronization.
+- Forward an idempotent media Pause when the active headphone output disconnects.
+- Pause media when the active AirPods are removed and resume only when the App
+  previously paused that playback, using local Bluetooth proximity broadcasts.
+- Avoid the entitlement-gated MediaRemote playback-state query and infer recent
+  playback from virtual-audio producer progress, preventing an AirPods-removal crash.
+- Reassert Pause once after 750 ms while an AirPod remains removed, covering media
+  clients such as Chrome that briefly acknowledge Pause and immediately resume.
+- Require a stable worn-again state before resuming playback, so an AirPods
+  proximity-sensor rebound cannot immediately cancel a removal pause.
+
 ## 0.5.1 - 2026-08-03
 
 - Blocked routing when the installed HAL driver does not match the bundled

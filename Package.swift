@@ -30,6 +30,7 @@ let package = Package(
       linkerSettings: [
         .linkedFramework("AppKit"),
         .linkedFramework("CoreAudio"),
+        .linkedFramework("CoreBluetooth"),
       ]
     ),
     .executableTarget(

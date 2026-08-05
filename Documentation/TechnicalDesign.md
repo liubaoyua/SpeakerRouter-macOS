@@ -55,9 +55,15 @@ An output switch follows this sequence:
 4. Start the selected physical output before making the virtual device default.
 5. Ramp to the new device's remembered gain.
 
-Underruns output silence. The shared header tracks only the physical render
-callback frame count required by route-health recovery; it does not scan audio
-samples or perform diagnostic work on either real-time thread.
+Underruns output silence. The physical callback keeps the shared ring inside a
+bounded low-latency window. Normal clock error is absorbed by consuming one
+extra or one fewer source frame per callback with linear interpolation; an
+already stale multi-second backlog is discarded to the current latency target.
+The virtual driver reports the physical device, stream, safety, buffer, and
+relay latency so media clients can account for wireless presentation delay.
+The shared header otherwise tracks only the physical render callback frame
+count required by route-health recovery; it does not scan samples, allocate, or
+perform diagnostic work on either real-time thread.
 
 ### OutputDeviceRepository
 
@@ -101,7 +107,22 @@ the same hardware device.
 
 A SwiftUI/AppKit `MenuBarExtra` window lists online and offline devices, permits
 manual selection and reordering, shows the active output, and controls the
-per-device volume. It starts at login and owns the relay lifecycle.
+per-device volume. It starts at login and owns the relay lifecycle. When the
+active headphone route disappears, it dynamically resolves MediaRemote's
+idempotent Pause command before selecting a fallback. macOS has no public API
+for pausing another app; if that runtime symbol is unavailable, routing still
+continues without requesting Accessibility access.
+
+While an AirPods output is active, the App uses CoreBluetooth to observe that
+device's local Apple proximity-status advertisements and decodes the two earbud
+placement fields. The first status establishes a baseline. An in-ear to
+out-of-ear transition checks whether the virtual driver's producer frame count
+advanced recently and sends an explicit Pause only while an audio client was
+active. The inverse transition sends Play only if that pause command was
+accepted. This avoids the entitlement-gated MediaRemote playback-state query;
+MediaRemote is used only for explicit Pause and Play commands. Bluetooth denial,
+an unknown advertisement, or missing command symbols disables this convenience
+without affecting the audio route. No advertisement is persisted or transmitted.
 
 ### SpeakerRouterGuard
 
@@ -126,7 +147,8 @@ Writes are atomic and occur only outside audio callbacks.
 ## Verification strategy
 
 Pure Swift tests cover priority insertion, custom ordering, manual-lock
-retention, lock removal on disconnect, volume clamping, and persistence. Core
+retention, lock removal on disconnect, AirPods placement parsing and playback
+state transitions, volume clamping, and persistence. Core
 Audio integration tests use a fake device repository first. Manual acceptance
 on the Mac covers HDMI/DP, wired, Bluetooth, USB, media keys, sleep/wake,
 hot-plugging, app quit, and forced termination.

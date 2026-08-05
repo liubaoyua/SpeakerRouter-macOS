@@ -7,7 +7,7 @@ import Testing
 struct SharedAudioTransportTests {
   @Test("Driver mapping and app mapping exchange stereo frames")
   func roundTripAcrossMappings() throws {
-    let transport = try #require(SRSharedAudioTransportCreate(8, 2))
+    let transport = try #require(SRSharedAudioTransportCreate(8, 2, 0))
     defer { SRSharedAudioTransportDestroy(transport) }
 
     var configuration = SRSharedAudioTransportConfiguration()
@@ -33,6 +33,7 @@ struct SharedAudioTransportTests {
     #expect(read == 3)
     #expect(output == input)
     let metrics = SRSharedAudioBufferGetMetrics(appBuffer)
+    #expect(metrics.writtenFrames == 3)
     #expect(metrics.requestedRenderFrames == 3)
   }
 
@@ -47,12 +48,13 @@ struct SharedAudioTransportTests {
 
   @Test("Configuration token round-trips through the remote-driver wire format")
   func configurationTokenRoundTrip() throws {
-    let transport = try #require(SRSharedAudioTransportCreate(8, 2))
+    let transport = try #require(SRSharedAudioTransportCreate(8, 2, 2468))
     defer { SRSharedAudioTransportDestroy(transport) }
 
     let token = try #require(SRSharedAudioTransportGetConfigurationToken(transport))
     var configuration = SRSharedAudioTransportConfiguration()
     #expect(SRSharedAudioTransportParseConfigurationToken(token, &configuration))
+    #expect(configuration.outputLatencyFrames == 2468)
 
     let mapping = try #require(SRSharedAudioMappingOpen(&configuration))
     SRSharedAudioMappingDestroy(mapping)
@@ -66,7 +68,7 @@ struct SharedAudioTransportTests {
   @Test("An obsolete protocol token is rejected")
   func obsoleteProtocolToken() {
     var configuration = SRSharedAudioTransportConfiguration()
-    let accepted = "SR1|4096|/SR-000000000000000000000000".withCString {
+    let accepted = "SR2|4096|/SR-000000000000000000000000".withCString {
       SRSharedAudioTransportParseConfigurationToken($0, &configuration)
     }
     #expect(!accepted)
@@ -81,9 +83,21 @@ struct SharedAudioTransportTests {
     #expect(error.description.contains("update or reinstall the driver"))
   }
 
+  @Test("Physical latency is converted into virtual-device frames")
+  func outputLatencyConversion() {
+    #expect(
+      AudioRelayEngine.convertOutputLatencyFrames(
+        physicalFrames: 441,
+        physicalSampleRate: 44_100,
+        relaySampleRate: 48_000,
+        bufferedFrames: 1024
+      ) == 1504
+    )
+  }
+
   @Test("Underflow is padded with silence")
   func underflow() throws {
-    let transport = try #require(SRSharedAudioTransportCreate(8, 2))
+    let transport = try #require(SRSharedAudioTransportCreate(8, 2, 0))
     defer { SRSharedAudioTransportDestroy(transport) }
     let buffer = SRSharedAudioTransportGetBuffer(transport)
     let input: [Float] = [0.5, -0.5]
@@ -101,7 +115,7 @@ struct SharedAudioTransportTests {
 
   @Test("Writer overrun preserves the newest complete frames")
   func writerOverrun() throws {
-    let transport = try #require(SRSharedAudioTransportCreate(4, 2))
+    let transport = try #require(SRSharedAudioTransportCreate(4, 2, 0))
     defer { SRSharedAudioTransportDestroy(transport) }
     let buffer = SRSharedAudioTransportGetBuffer(transport)
     let input: [Float] = [
@@ -121,9 +135,52 @@ struct SharedAudioTransportTests {
     #expect(output == [3, -3, 4, -4, 5, -5, 6, -6])
   }
 
+  @Test("Drift compensation discards stale multi-second backlog")
+  func driftCompensationBoundsLatency() throws {
+    let transport = try #require(SRSharedAudioTransportCreate(8192, 2, 0))
+    defer { SRSharedAudioTransportDestroy(transport) }
+    let buffer = SRSharedAudioTransportGetBuffer(transport)
+    let input = (0..<5000).flatMap { frame in
+      [Float(frame), -Float(frame)]
+    }
+    input.withUnsafeBufferPointer {
+      _ = SRSharedAudioBufferWrite(buffer, $0.baseAddress!, 5000)
+    }
+
+    var output = [Float](repeating: 0, count: 8)
+    let consumed = output.withUnsafeMutableBufferPointer {
+      SRSharedAudioBufferReadWithDriftCompensation(buffer, $0.baseAddress!, 4)
+    }
+
+    #expect(consumed == 4)
+    #expect(output == [3976, -3976, 3977, -3977, 3978, -3978, 3979, -3979])
+    #expect(SRSharedAudioBufferAvailableFrames(buffer) == 1020)
+  }
+
+  @Test("Drift compensation tracks a consistently faster producer")
+  func fasterProducerClock() throws {
+    let transport = try #require(SRSharedAudioTransportCreate(8192, 2, 0))
+    defer { SRSharedAudioTransportDestroy(transport) }
+    let buffer = SRSharedAudioTransportGetBuffer(transport)
+    let input = [Float](repeating: 0.25, count: 481 * 2)
+    var output = [Float](repeating: 0, count: 480 * 2)
+
+    for _ in 0..<5000 {
+      input.withUnsafeBufferPointer {
+        _ = SRSharedAudioBufferWrite(buffer, $0.baseAddress!, 481)
+      }
+      output.withUnsafeMutableBufferPointer {
+        _ = SRSharedAudioBufferReadWithDriftCompensation(buffer, $0.baseAddress!, 480)
+      }
+    }
+
+    #expect(SRSharedAudioBufferAvailableFrames(buffer) < 1600)
+    #expect(output.allSatisfy { $0 == 0.25 })
+  }
+
   @Test("Gain is clamped and smoothly reaches the target")
   func gain() throws {
-    let transport = try #require(SRSharedAudioTransportCreate(8, 2))
+    let transport = try #require(SRSharedAudioTransportCreate(8, 2, 0))
     defer { SRSharedAudioTransportDestroy(transport) }
     let buffer = SRSharedAudioTransportGetBuffer(transport)
 
@@ -148,11 +205,26 @@ struct SharedAudioTransportTests {
 
   @Test("Relay health depends only on the physical render callback")
   func relayHealth() {
-    let baseline = AudioRelayStatistics(requestedRenderFrames: 100)
-    let healthy = AudioRelayStatistics(requestedRenderFrames: 200)
-    let stalled = AudioRelayStatistics(requestedRenderFrames: 100)
+    let baseline = AudioRelayStatistics(writtenFrames: 10, requestedRenderFrames: 100)
+    let healthy = AudioRelayStatistics(writtenFrames: 10, requestedRenderFrames: 200)
+    let stalled = AudioRelayStatistics(writtenFrames: 20, requestedRenderFrames: 100)
 
     #expect(healthy.renderCallbackAdvanced(since: baseline))
     #expect(!stalled.renderCallbackAdvanced(since: baseline))
+  }
+
+  @Test("Recent audio activity follows producer progress, not the always-running renderer")
+  func recentAudioActivity() {
+    var tracker = RecentAudioActivityTracker(maximumIdleInterval: 2)
+
+    tracker.observe(writtenFrames: 100, at: 10)
+    #expect(!tracker.hasRecentActivity(at: 10))
+
+    tracker.observe(writtenFrames: 200, at: 11)
+    #expect(tracker.hasRecentActivity(at: 12.9))
+    #expect(!tracker.hasRecentActivity(at: 13.1))
+
+    tracker.observe(writtenFrames: 0, at: 14)
+    #expect(!tracker.hasRecentActivity(at: 14))
   }
 }

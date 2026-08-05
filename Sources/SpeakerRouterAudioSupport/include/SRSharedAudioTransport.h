@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 #define SRSharedAudioTransportPropertySelector 0x5352736du
-#define SRSharedAudioTransportProtocolVersion 2u
+#define SRSharedAudioTransportProtocolVersion 3u
 #define SRSharedAudioTransportNameCapacity 96u
 #define SRSharedAudioTransportTokenCapacity 160u
 
@@ -21,10 +21,12 @@ typedef struct SRSharedAudioBuffer SRSharedAudioBuffer;
 typedef struct SRSharedAudioTransportConfiguration {
     uint32_t protocolVersion;
     uint32_t mappingSize;
+    uint32_t outputLatencyFrames;
     char sharedMemoryName[SRSharedAudioTransportNameCapacity];
 } SRSharedAudioTransportConfiguration;
 
 typedef struct SRSharedAudioMetrics {
+    uint64_t writtenFrames;
     uint64_t requestedRenderFrames;
 } SRSharedAudioMetrics;
 
@@ -32,7 +34,8 @@ typedef struct SRSharedAudioMetrics {
 // driver maps it, unlink the name so no additional process can open the audio buffer.
 SRSharedAudioTransport* _Nullable SRSharedAudioTransportCreate(
     uint32_t capacityFrames,
-    uint32_t channelCount
+    uint32_t channelCount,
+    uint32_t outputLatencyFrames
 );
 void SRSharedAudioTransportDestroy(SRSharedAudioTransport* _Nullable transport);
 bool SRSharedAudioTransportCopyConfiguration(
@@ -74,6 +77,11 @@ uint32_t SRSharedAudioBufferWrite(
     uint32_t frameCount
 );
 uint32_t SRSharedAudioBufferRead(
+    SRSharedAudioBuffer* _Nonnull buffer,
+    float* _Nonnull interleavedSamples,
+    uint32_t frameCount
+);
+uint32_t SRSharedAudioBufferReadWithDriftCompensation(
     SRSharedAudioBuffer* _Nonnull buffer,
     float* _Nonnull interleavedSamples,
     uint32_t frameCount

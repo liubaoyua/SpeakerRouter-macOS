@@ -151,6 +151,7 @@ static UInt64								gDevice_AnchorHostTime			= 0;
 // by SpeakerRouterApp. The app reads this memory from its physical-output callback and never
 // opens a Core Audio input device, so macOS does not treat routing as microphone capture.
 static _Atomic(SRSharedAudioBuffer*)		gSharedAudioBuffer				= NULL;
+static _Atomic(UInt32)					gReportedOutputLatencyFrames	= 0;
 static SRSharedAudioMapping*				gSharedAudioMapping				= NULL;
 
 typedef struct RetiredSharedAudioMapping
@@ -2396,10 +2397,12 @@ static OSStatus	NullAudio_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			break;
 
 		case kAudioDevicePropertyLatency:
-			//	This property returns the presentation latency of the device. For this,
-			//	device, the value is 0 due to the fact that it always vends silence.
+			// Report the physical destination's presentation latency plus the relay's bounded
+			// shared-buffer latency so media clients can keep video synchronized with output.
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "NullAudio_GetDevicePropertyData: not enough space for the return value of kAudioDevicePropertyLatency for the device");
-			*((UInt32*)outData) = 0;
+			*((UInt32*)outData) = inAddress->mScope == kAudioObjectPropertyScopeOutput
+				? atomic_load_explicit(&gReportedOutputLatencyFrames, memory_order_relaxed)
+				: 0;
 			*outDataSize = sizeof(UInt32);
 			break;
 
@@ -2679,9 +2682,18 @@ static OSStatus	NullAudio_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 				pthread_mutex_lock(&gPlugIn_StateMutex);
 				NullAudio_ReplaceSharedAudioMapping(theNewMapping);
 				pthread_mutex_unlock(&gPlugIn_StateMutex);
-				// This private handshake changes no externally observable device property. Reporting a
-				// property notification here makes the remote HAL proxy reconcile the whole object tree.
-				*outNumberPropertiesChanged = 0;
+				UInt32 theOldOutputLatencyFrames = atomic_exchange_explicit(
+					&gReportedOutputLatencyFrames,
+					theConfiguration.outputLatencyFrames,
+					memory_order_relaxed
+				);
+				if(theOldOutputLatencyFrames != theConfiguration.outputLatencyFrames)
+				{
+					*outNumberPropertiesChanged = 1;
+					outChangedAddresses[0].mSelector = kAudioDevicePropertyLatency;
+					outChangedAddresses[0].mScope = kAudioObjectPropertyScopeOutput;
+					outChangedAddresses[0].mElement = kAudioObjectPropertyElementMain;
+				}
 			}
 			break;
 		

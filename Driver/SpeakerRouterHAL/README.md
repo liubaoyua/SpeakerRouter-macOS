@@ -11,7 +11,9 @@ Changes for SpeakerRouter:
 - the sample driver's established full-duplex object model, with an inert input
   stream retained for HAL compatibility;
 - a declared `CFString` custom property and private shared-memory stereo ring
-  that transfer the HAL output mix without the app opening an input device.
+  that transfer the HAL output mix without the app opening an input device;
+- physical-destination presentation latency supplied by the app and exposed
+  through the virtual output for media synchronization.
 
 Build from the repository root without installation:
 

@@ -94,6 +94,10 @@ final class RouterViewModel: ObservableObject {
   private let systemController = CoreAudioSystemController()
   private let volumeWatcher = CoreAudioVolumeWatcher()
   private let guardCoordinator = GuardCoordinator()
+  private let mediaPauseController = MediaPauseController()
+  private lazy var airPodsWearMonitor = AirPodsWearMonitor { [weak self] wearState in
+    self?.airPodsWearStateChanged(wearState)
+  }
   private let driverManager = DriverManager()
   private let relayEngine: AudioRelayEngine?
   private let store: FileRoutingStateStore
@@ -104,6 +108,10 @@ final class RouterViewModel: ObservableObject {
   private var failedRouteAttempt: String?
   private var liveDevices: [OutputDevice] = []
   private var state: RoutingState
+  private var airPodsWearBehavior = AirPodsWearPlaybackBehavior()
+  private var recentAudioActivity = RecentAudioActivityTracker()
+  private var airPodsPauseRetryTask: Task<Void, Never>?
+  private var airPodsPlayConfirmationTask: Task<Void, Never>?
   private var virtualDeviceID: AudioObjectID?
   private var activePhysicalDeviceUID: String?
 
@@ -190,6 +198,7 @@ final class RouterViewModel: ObservableObject {
     relayHealthTimer?.invalidate()
     relayHealthTimer = nil
     resetRelayHealthTracking()
+    stopAirPodsWearMonitoring()
     guardCoordinator.stopCleanly()
     volumeWatcher.stop()
     relayEngine?.stop()
@@ -243,6 +252,15 @@ final class RouterViewModel: ObservableObject {
   private func applyDeviceSnapshot(_ result: Result<[OutputDevice], Error>) {
     do {
       let snapshot = try result.get()
+      if relayEngine?.isRunning == true,
+        DeviceDisconnectBehavior.shouldPauseMedia(
+          activeDeviceUID: activePhysicalDeviceUID,
+          previousDevices: liveDevices,
+          currentDevices: snapshot
+        )
+      {
+        mediaPauseController.pause()
+      }
       if snapshot.map(\.uid) != liveDevices.map(\.uid) {
         failedRouteAttempt = nil
       }
@@ -276,6 +294,7 @@ final class RouterViewModel: ObservableObject {
       volumeWatcher.stop()
       relayEngine.stop()
       restoreFallbackPhysicalOutput()
+      stopAirPodsWearMonitoring()
       virtualDeviceID = nil
       activePhysicalDeviceUID = nil
       failedRouteAttempt = nil
@@ -293,6 +312,7 @@ final class RouterViewModel: ObservableObject {
         volumeWatcher.stop()
         guardCoordinator.stopCleanly()
         relayEngine.stop()
+        stopAirPodsWearMonitoring()
         virtualDeviceID = nil
         activePhysicalDeviceUID = nil
         resetRelayHealthTracking()
@@ -306,6 +326,7 @@ final class RouterViewModel: ObservableObject {
         guardCoordinator.stopCleanly()
         relayEngine.stop()
         restoreFallbackPhysicalOutput()
+        stopAirPodsWearMonitoring()
         activePhysicalDeviceUID = nil
         resetRelayHealthTracking()
         routeStatus = "没有可用的物理输出"
@@ -340,6 +361,7 @@ final class RouterViewModel: ObservableObject {
         state.lastUsablePhysicalDeviceUID = selectedUID
         activePhysicalDeviceUID = selectedUID
         virtualDeviceID = virtualID
+        startAirPodsWearMonitoring(for: destination)
         failedRouteAttempt = nil
         try store.save(state)
 
@@ -363,6 +385,7 @@ final class RouterViewModel: ObservableObject {
       volumeWatcher.stop()
       relayEngine.stop()
       restoreFallbackPhysicalOutput()
+      stopAirPodsWearMonitoring()
       virtualDeviceID = nil
       activePhysicalDeviceUID = nil
       resetRelayHealthTracking()
@@ -461,6 +484,7 @@ final class RouterViewModel: ObservableObject {
     volumeWatcher.stop()
     relayEngine?.stop()
     restoreFallbackPhysicalOutput()
+    stopAirPodsWearMonitoring()
     virtualDeviceID = nil
     activePhysicalDeviceUID = nil
     failedRouteAttempt = nil
@@ -542,6 +566,10 @@ final class RouterViewModel: ObservableObject {
     }
 
     let current = relayEngine.statistics()
+    recentAudioActivity.observe(
+      writtenFrames: current.writtenFrames,
+      at: Date.timeIntervalSinceReferenceDate
+    )
     guard let previousRelayStatistics else {
       resetRelayHealthTracking(baseline: current)
       return
@@ -572,6 +600,7 @@ final class RouterViewModel: ObservableObject {
     volumeWatcher.stop()
     relayEngine?.stop()
     restoreFallbackPhysicalOutput()
+    stopAirPodsWearMonitoring()
     virtualDeviceID = nil
     activePhysicalDeviceUID = nil
     resetRelayHealthTracking()
@@ -580,6 +609,114 @@ final class RouterViewModel: ObservableObject {
   private func resetRelayHealthTracking(baseline: AudioRelayStatistics? = nil) {
     previousRelayStatistics = baseline
     stalledRelayHealthChecks = 0
+    recentAudioActivity.reset()
+    if let baseline {
+      recentAudioActivity.observe(
+        writtenFrames: baseline.writtenFrames,
+        at: Date.timeIntervalSinceReferenceDate
+      )
+    }
+  }
+
+  private func startAirPodsWearMonitoring(for device: OutputDevice) {
+    cancelAirPodsPauseRetry()
+    cancelAirPodsPlayConfirmation()
+    airPodsWearBehavior.reset()
+    guard device.kind == .headphones,
+      device.name.localizedCaseInsensitiveContains("airpods")
+    else {
+      airPodsWearMonitor.stop()
+      return
+    }
+    airPodsWearMonitor.start(deviceName: device.name)
+  }
+
+  private func stopAirPodsWearMonitoring() {
+    cancelAirPodsPauseRetry()
+    cancelAirPodsPlayConfirmation()
+    airPodsWearBehavior.reset()
+    airPodsWearMonitor.stop()
+  }
+
+  private func airPodsWearStateChanged(_ wearState: AirPodsWearState) {
+    // Every real sensor transition invalidates a pending "worn again" decision.
+    // In particular, an out -> in -> out optical-sensor bounce must not resume media.
+    cancelAirPodsPlayConfirmation()
+    guard let relayEngine, relayEngine.isRunning,
+      let activePhysicalDeviceUID,
+      liveDevices.contains(where: {
+        $0.uid == activePhysicalDeviceUID
+          && $0.kind == .headphones
+          && $0.name.localizedCaseInsensitiveContains("airpods")
+      }),
+      let action = airPodsWearBehavior.observe(wearState)
+    else {
+      return
+    }
+
+    switch action {
+    case .requestPause:
+      let now = Date.timeIntervalSinceReferenceDate
+      let current = relayEngine.statistics()
+      recentAudioActivity.observe(
+        writtenFrames: current.writtenFrames,
+        at: now
+      )
+      guard recentAudioActivity.hasRecentActivity(at: now),
+        mediaPauseController.pause()
+      else {
+        airPodsWearBehavior.cancelPauseRequest()
+        return
+      }
+      airPodsWearBehavior.confirmPausedForRemoval()
+      scheduleAirPodsPauseRetry()
+    case .requestPlay:
+      cancelAirPodsPauseRetry()
+      scheduleAirPodsPlayConfirmation()
+    }
+  }
+
+  private func scheduleAirPodsPauseRetry() {
+    cancelAirPodsPauseRetry()
+    airPodsPauseRetryTask = Task { [weak self] in
+      try? await Task.sleep(for: .milliseconds(750))
+      guard !Task.isCancelled, let self,
+        self.airPodsWearBehavior.shouldRemainPausedAfterRemoval,
+        self.relayEngine?.isRunning == true
+      else {
+        return
+      }
+      self.mediaPauseController.pause()
+      self.airPodsPauseRetryTask = nil
+    }
+  }
+
+  private func cancelAirPodsPauseRetry() {
+    airPodsPauseRetryTask?.cancel()
+    airPodsPauseRetryTask = nil
+  }
+
+  private func scheduleAirPodsPlayConfirmation() {
+    airPodsPlayConfirmationTask = Task { [weak self] in
+      // AirPods proximity broadcasts can briefly flip back to "in ear" after
+      // removal. Only resume after that state has remained stable.
+      try? await Task.sleep(for: .milliseconds(1_250))
+      guard !Task.isCancelled, let self,
+        self.airPodsWearBehavior.shouldRemainPausedAfterRemoval,
+        self.relayEngine?.isRunning == true
+      else {
+        return
+      }
+      if self.mediaPauseController.play() {
+        self.airPodsWearBehavior.confirmResumedAfterReinsertion()
+      }
+      self.airPodsPlayConfirmationTask = nil
+    }
+  }
+
+  private func cancelAirPodsPlayConfirmation() {
+    airPodsPlayConfirmationTask?.cancel()
+    airPodsPlayConfirmationTask = nil
   }
 
 }

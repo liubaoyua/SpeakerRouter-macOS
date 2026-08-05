@@ -91,6 +91,124 @@ struct RoutingStateTests {
     #expect(state.selectedDeviceUID(from: remaining) == "headphones")
   }
 
+  @Test("Only disconnecting the active headphones requests a media pause")
+  func headphoneDisconnectPausePolicy() {
+    let headphones = device("headphones", kind: .headphones)
+    let display = device("display", kind: .display)
+
+    #expect(
+      DeviceDisconnectBehavior.shouldPauseMedia(
+        activeDeviceUID: headphones.uid,
+        previousDevices: [headphones, display],
+        currentDevices: [display]
+      )
+    )
+    #expect(
+      !DeviceDisconnectBehavior.shouldPauseMedia(
+        activeDeviceUID: display.uid,
+        previousDevices: [headphones, display],
+        currentDevices: [headphones]
+      )
+    )
+    #expect(
+      !DeviceDisconnectBehavior.shouldPauseMedia(
+        activeDeviceUID: headphones.uid,
+        previousDevices: [headphones, display],
+        currentDevices: [headphones, display]
+      )
+    )
+  }
+
+  @Test("AirPods proximity status decodes either ear as worn")
+  func airPodsProximityStatus() {
+    let bothInEar = Data([
+      0x4C, 0x00, 0x07, 0x19, 0x01, 0x1B, 0x20, 0x0B,
+      0x99, 0x8F, 0x11, 0x00, 0x05, 0x05, 0x5E, 0x5F,
+    ])
+    var neitherInEar = bothInEar
+    neitherInEar[7] = 0x15
+    var primaryInEar = bothInEar
+    primaryInEar[7] = 0x13
+
+    #expect(
+      AirPodsProximityAdvertisement.wearState(from: bothInEar)
+        == AirPodsWearState(primaryInEar: true, secondaryInEar: true)
+    )
+    #expect(
+      AirPodsProximityAdvertisement.wearState(from: primaryInEar)
+        == AirPodsWearState(primaryInEar: true, secondaryInEar: false)
+    )
+    #expect(
+      AirPodsProximityAdvertisement.wearState(from: neitherInEar)
+        == AirPodsWearState(primaryInEar: false, secondaryInEar: false)
+    )
+    #expect(AirPodsProximityAdvertisement.wearState(from: Data([0x4C, 0x00])) == nil)
+  }
+
+  @Test("AirPods resume only after a confirmed removal pause")
+  func airPodsWearPlaybackPolicy() {
+    var behavior = AirPodsWearPlaybackBehavior()
+    let bothWorn = AirPodsWearState(primaryInEar: true, secondaryInEar: true)
+    let oneWorn = AirPodsWearState(primaryInEar: true, secondaryInEar: false)
+
+    #expect(behavior.observe(bothWorn) == nil)
+    #expect(behavior.observe(oneWorn) == .requestPause)
+    #expect(behavior.observe(bothWorn) == nil)
+
+    #expect(behavior.observe(oneWorn) == .requestPause)
+    behavior.confirmPausedForRemoval()
+    #expect(behavior.shouldRemainPausedAfterRemoval)
+    #expect(behavior.observe(bothWorn) == .requestPlay)
+    #expect(behavior.shouldRemainPausedAfterRemoval)
+    behavior.confirmResumedAfterReinsertion()
+    #expect(!behavior.shouldRemainPausedAfterRemoval)
+    #expect(behavior.observe(bothWorn) == nil)
+  }
+
+  @Test("A delayed pause confirmation cannot resume after AirPods are already worn")
+  func delayedAirPodsPauseConfirmation() {
+    var behavior = AirPodsWearPlaybackBehavior()
+    let bothWorn = AirPodsWearState(primaryInEar: true, secondaryInEar: true)
+    let oneWorn = AirPodsWearState(primaryInEar: true, secondaryInEar: false)
+
+    #expect(behavior.observe(bothWorn) == nil)
+    #expect(behavior.observe(oneWorn) == .requestPause)
+    #expect(behavior.observe(bothWorn) == nil)
+    behavior.confirmPausedForRemoval()
+
+    #expect(behavior.observe(oneWorn) == .requestPause)
+  }
+
+  @Test("Removing the second AirPod preserves the confirmed resume")
+  func removingSecondAirPodPreservesResume() {
+    var behavior = AirPodsWearPlaybackBehavior()
+    let bothWorn = AirPodsWearState(primaryInEar: true, secondaryInEar: true)
+    let oneWorn = AirPodsWearState(primaryInEar: true, secondaryInEar: false)
+    let neitherWorn = AirPodsWearState(primaryInEar: false, secondaryInEar: false)
+
+    #expect(behavior.observe(bothWorn) == nil)
+    #expect(behavior.observe(oneWorn) == .requestPause)
+    behavior.confirmPausedForRemoval()
+    #expect(behavior.observe(neitherWorn) == nil)
+    #expect(behavior.observe(oneWorn) == .requestPlay)
+  }
+
+  @Test("A transient worn-again sensor state does not clear the removal pause")
+  func transientAirPodsReinsertion() {
+    var behavior = AirPodsWearPlaybackBehavior()
+    let bothWorn = AirPodsWearState(primaryInEar: true, secondaryInEar: true)
+    let oneWorn = AirPodsWearState(primaryInEar: true, secondaryInEar: false)
+
+    #expect(behavior.observe(bothWorn) == nil)
+    #expect(behavior.observe(oneWorn) == .requestPause)
+    behavior.confirmPausedForRemoval()
+
+    #expect(behavior.observe(bothWorn) == .requestPlay)
+    #expect(behavior.observe(oneWorn) == nil)
+    #expect(behavior.shouldRemainPausedAfterRemoval)
+    #expect(behavior.observe(bothWorn) == .requestPlay)
+  }
+
   @Test("Device volume is remembered and clamped")
   func perDeviceVolume() {
     let display = device("display", kind: .display)

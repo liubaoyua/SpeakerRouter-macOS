@@ -27,6 +27,7 @@ public enum AudioRelayEngineError: Error, CustomStringConvertible, Sendable {
 }
 
 public struct AudioRelayStatistics: Equatable, Sendable {
+  public let writtenFrames: UInt64
   public let requestedRenderFrames: UInt64
 
   public func renderCallbackAdvanced(since previous: AudioRelayStatistics) -> Bool {
@@ -38,6 +39,7 @@ public final class AudioRelayEngine: @unchecked Sendable {
   private static let channelCount: UInt32 = 2
   private static let maximumFramesPerSlice: UInt32 = 8192
   private static let ringCapacityFrames: UInt32 = 131_072
+  private static let relayBufferedLatencyFrames: UInt32 = 1024
 
   private var sharedTransport: OpaquePointer?
   private var sharedBuffer: OpaquePointer?
@@ -65,7 +67,11 @@ public final class AudioRelayEngine: @unchecked Sendable {
       guard
         let transport = SRSharedAudioTransportCreate(
           Self.ringCapacityFrames,
-          Self.channelCount
+          Self.channelCount,
+          reportedOutputLatencyFrames(
+            for: destinationDeviceID,
+            relaySampleRate: sampleRate
+          )
         )
       else {
         throw AudioRelayEngineError.sharedTransport("unable to allocate shared memory")
@@ -143,11 +149,13 @@ public final class AudioRelayEngine: @unchecked Sendable {
   public func statistics() -> AudioRelayStatistics {
     guard let sharedBuffer else {
       return AudioRelayStatistics(
+        writtenFrames: 0,
         requestedRenderFrames: 0
       )
     }
     let metrics = SRSharedAudioBufferGetMetrics(sharedBuffer)
     return AudioRelayStatistics(
+      writtenFrames: metrics.writtenFrames,
       requestedRenderFrames: metrics.requestedRenderFrames
     )
   }
@@ -176,8 +184,156 @@ public final class AudioRelayEngine: @unchecked Sendable {
       return noErr
     }
     let samples = data.assumingMemoryBound(to: Float.self)
-    _ = SRSharedAudioBufferRead(sharedBuffer, samples, frameCount)
+    _ = SRSharedAudioBufferReadWithDriftCompensation(sharedBuffer, samples, frameCount)
     return noErr
+  }
+
+  private func reportedOutputLatencyFrames(
+    for deviceID: AudioObjectID,
+    relaySampleRate: Double
+  ) -> UInt32 {
+    let physicalSampleRate = doubleProperty(
+      kAudioDevicePropertyNominalSampleRate,
+      of: deviceID,
+      scope: kAudioObjectPropertyScopeGlobal
+    ) ?? relaySampleRate
+    let deviceLatency = uint32Property(
+      kAudioDevicePropertyLatency,
+      of: deviceID,
+      scope: kAudioObjectPropertyScopeOutput
+    ) ?? 0
+    let safetyOffset = uint32Property(
+      kAudioDevicePropertySafetyOffset,
+      of: deviceID,
+      scope: kAudioObjectPropertyScopeOutput
+    ) ?? 0
+    let bufferFrames = uint32Property(
+      kAudioDevicePropertyBufferFrameSize,
+      of: deviceID,
+      scope: kAudioObjectPropertyScopeGlobal
+    ) ?? 0
+    let streamLatency = objectIDsProperty(
+      kAudioDevicePropertyStreams,
+      of: deviceID,
+      scope: kAudioObjectPropertyScopeOutput
+    )
+    .compactMap {
+      uint32Property(
+        kAudioStreamPropertyLatency,
+        of: $0,
+        scope: kAudioObjectPropertyScopeGlobal
+      )
+    }
+    .max() ?? 0
+
+    let physicalFrames = UInt64(deviceLatency) + UInt64(safetyOffset)
+      + UInt64(bufferFrames) + UInt64(streamLatency)
+    return Self.convertOutputLatencyFrames(
+      physicalFrames: physicalFrames,
+      physicalSampleRate: physicalSampleRate,
+      relaySampleRate: relaySampleRate,
+      bufferedFrames: Self.relayBufferedLatencyFrames
+    )
+  }
+
+  static func convertOutputLatencyFrames(
+    physicalFrames: UInt64,
+    physicalSampleRate: Double,
+    relaySampleRate: Double,
+    bufferedFrames: UInt32
+  ) -> UInt32 {
+    let convertedFrames = physicalSampleRate > 0
+      ? (Double(physicalFrames) * relaySampleRate / physicalSampleRate).rounded()
+      : Double(physicalFrames)
+    let total = min(
+      Double(UInt32.max),
+      max(0, convertedFrames) + Double(bufferedFrames)
+    )
+    return UInt32(total)
+  }
+
+  private func uint32Property(
+    _ selector: AudioObjectPropertySelector,
+    of objectID: AudioObjectID,
+    scope: AudioObjectPropertyScope
+  ) -> UInt32? {
+    var address = AudioObjectPropertyAddress(
+      mSelector: selector,
+      mScope: scope,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    guard AudioObjectHasProperty(objectID, &address) else { return nil }
+    var value: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    guard AudioObjectGetPropertyData(
+      objectID,
+      &address,
+      0,
+      nil,
+      &size,
+      &value
+    ) == noErr else { return nil }
+    return value
+  }
+
+  private func doubleProperty(
+    _ selector: AudioObjectPropertySelector,
+    of objectID: AudioObjectID,
+    scope: AudioObjectPropertyScope
+  ) -> Double? {
+    var address = AudioObjectPropertyAddress(
+      mSelector: selector,
+      mScope: scope,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    guard AudioObjectHasProperty(objectID, &address) else { return nil }
+    var value = 0.0
+    var size = UInt32(MemoryLayout<Double>.size)
+    guard AudioObjectGetPropertyData(
+      objectID,
+      &address,
+      0,
+      nil,
+      &size,
+      &value
+    ) == noErr else { return nil }
+    return value
+  }
+
+  private func objectIDsProperty(
+    _ selector: AudioObjectPropertySelector,
+    of objectID: AudioObjectID,
+    scope: AudioObjectPropertyScope
+  ) -> [AudioObjectID] {
+    var address = AudioObjectPropertyAddress(
+      mSelector: selector,
+      mScope: scope,
+      mElement: kAudioObjectPropertyElementMain
+    )
+    guard AudioObjectHasProperty(objectID, &address) else { return [] }
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(
+      objectID,
+      &address,
+      0,
+      nil,
+      &size
+    ) == noErr, size > 0 else { return [] }
+    var values = [AudioObjectID](
+      repeating: kAudioObjectUnknown,
+      count: Int(size) / MemoryLayout<AudioObjectID>.size
+    )
+    let status = values.withUnsafeMutableBytes { bytes in
+      AudioObjectGetPropertyData(
+        objectID,
+        &address,
+        0,
+        nil,
+        &size,
+        bytes.baseAddress!
+      )
+    }
+    return status == noErr ? values : []
   }
 
   private func makeHALAudioUnit() throws -> AudioUnit {

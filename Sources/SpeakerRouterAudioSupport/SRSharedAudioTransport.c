@@ -91,7 +91,8 @@ static bool bufferHeaderIsValid(
 
 SRSharedAudioTransport* SRSharedAudioTransportCreate(
     uint32_t capacityFrames,
-    uint32_t channelCount
+    uint32_t channelCount,
+    uint32_t outputLatencyFrames
 ) {
     size_t mappingSize = 0;
     if(!calculateMappingSize(capacityFrames, channelCount, &mappingSize)) {
@@ -157,12 +158,14 @@ SRSharedAudioTransport* SRSharedAudioTransportCreate(
     transport->buffer = memory;
     transport->configuration.protocolVersion = SRSharedAudioTransportProtocolVersion;
     transport->configuration.mappingSize = (uint32_t)mappingSize;
+    transport->configuration.outputLatencyFrames = outputLatencyFrames;
     int tokenLength = snprintf(
         transport->configurationToken,
         sizeof(transport->configurationToken),
-        "SR%u|%u|%s",
+        "SR%u|%u|%u|%s",
         transport->configuration.protocolVersion,
         transport->configuration.mappingSize,
+        transport->configuration.outputLatencyFrames,
         transport->configuration.sharedMemoryName
     );
     if(tokenLength <= 0 ||
@@ -358,7 +361,14 @@ bool SRSharedAudioTransportParseConfigurationToken(
         mappingSize == 0 || mappingSize > UINT32_MAX) {
         return false;
     }
-    const char* name = sizeEnd + 1;
+    const char* latencyStart = sizeEnd + 1;
+    char* latencyEnd = NULL;
+    unsigned long outputLatencyFrames = strtoul(latencyStart, &latencyEnd, 10);
+    if(latencyEnd == latencyStart || latencyEnd == NULL || *latencyEnd != '|' ||
+        outputLatencyFrames > UINT32_MAX) {
+        return false;
+    }
+    const char* name = latencyEnd + 1;
     size_t nameLength = strlen(name);
     if(nameLength < 4 || nameLength >= SRSharedAudioTransportNameCapacity ||
         strncmp(name, "/SR-", 4) != 0) {
@@ -368,6 +378,7 @@ bool SRSharedAudioTransportParseConfigurationToken(
     memset(configuration, 0, sizeof(*configuration));
     configuration->protocolVersion = SRSharedAudioTransportProtocolVersion;
     configuration->mappingSize = (uint32_t)mappingSize;
+    configuration->outputLatencyFrames = (uint32_t)outputLatencyFrames;
     memcpy(configuration->sharedMemoryName, name, nameLength + 1);
     return true;
 }
@@ -428,10 +439,20 @@ uint32_t SRSharedAudioBufferWrite(
     return frameCount;
 }
 
-uint32_t SRSharedAudioBufferRead(
+static float sampleAtFrame(
+    const SRSharedAudioBuffer* buffer,
+    uint64_t absoluteFrame,
+    uint32_t channel
+) {
+    uint32_t frame = (uint32_t)(absoluteFrame % buffer->capacityFrames);
+    return buffer->samples[(size_t)frame * buffer->channelCount + channel];
+}
+
+static uint32_t readFrames(
     SRSharedAudioBuffer* buffer,
     float* interleavedSamples,
-    uint32_t frameCount
+    uint32_t frameCount,
+    bool compensateForDrift
 ) {
     if(buffer == NULL || interleavedSamples == NULL || frameCount == 0) {
         return 0;
@@ -454,29 +475,98 @@ uint32_t SRSharedAudioBufferRead(
         available = buffer->capacityFrames;
     }
 
+    uint32_t framesToConsume = frameCount;
+    bool resample = false;
+    if(compensateForDrift && buffer->capacityFrames >= 8192) {
+        uint64_t targetBufferedFrames = (uint64_t)frameCount * 2;
+        if(targetBufferedFrames < 1024) {
+            targetBufferedFrames = 1024;
+        }
+        uint64_t maximumBufferedFrames = targetBufferedFrames + (uint64_t)frameCount * 4;
+        if(maximumBufferedFrames < 4096) {
+            maximumBufferedFrames = 4096;
+        }
+        if(maximumBufferedFrames >= buffer->capacityFrames) {
+            maximumBufferedFrames = buffer->capacityFrames - 1;
+        }
+        if(targetBufferedFrames >= maximumBufferedFrames) {
+            targetBufferedFrames = maximumBufferedFrames / 2;
+        }
+
+        // A discontinuity is preferable to seconds of stale audio. This path runs only after
+        // the producer clock has escaped the bounded low-latency window.
+        if(available > maximumBufferedFrames) {
+            readPosition = writePosition - targetBufferedFrames;
+            available = targetBufferedFrames;
+        }
+
+        // Absorb normal hardware-clock error one frame per callback. Linear interpolation makes
+        // the occasional extra/dropped source frame continuous instead of inserting a click.
+        if(available > targetBufferedFrames + frameCount &&
+            available >= (uint64_t)frameCount + 1) {
+            framesToConsume = frameCount + 1;
+            resample = true;
+        } else if(available + frameCount < targetBufferedFrames && frameCount > 1 &&
+            available >= frameCount - 1) {
+            framesToConsume = frameCount - 1;
+            resample = true;
+        }
+    }
+
     uint32_t framesToRead = frameCount;
     if(available < framesToRead) {
         framesToRead = (uint32_t)available;
     }
-    uint32_t startFrame = (uint32_t)(readPosition % buffer->capacityFrames);
-    uint32_t firstFrames = buffer->capacityFrames - startFrame;
-    if(firstFrames > framesToRead) {
-        firstFrames = framesToRead;
-    }
-    memcpy(
-        interleavedSamples,
-        &buffer->samples[(size_t)startFrame * buffer->channelCount],
-        (size_t)firstFrames * buffer->channelCount * sizeof(float)
-    );
-    if(firstFrames < framesToRead) {
+    if(resample) {
+        double scale = frameCount > 1
+            ? (double)(framesToConsume - 1) / (double)(frameCount - 1)
+            : 0.0;
+        for(uint32_t outputFrame = 0; outputFrame < frameCount; ++outputFrame) {
+            double sourcePosition = outputFrame * scale;
+            uint32_t firstSourceFrame = (uint32_t)sourcePosition;
+            uint32_t secondSourceFrame = firstSourceFrame + 1;
+            if(secondSourceFrame >= framesToConsume) {
+                secondSourceFrame = framesToConsume - 1;
+            }
+            float fraction = (float)(sourcePosition - firstSourceFrame);
+            for(uint32_t channel = 0; channel < buffer->channelCount; ++channel) {
+                float first = sampleAtFrame(
+                    buffer,
+                    readPosition + firstSourceFrame,
+                    channel
+                );
+                float second = sampleAtFrame(
+                    buffer,
+                    readPosition + secondSourceFrame,
+                    channel
+                );
+                interleavedSamples[(size_t)outputFrame * buffer->channelCount + channel] =
+                    first + (second - first) * fraction;
+            }
+        }
+        framesToRead = framesToConsume;
+    } else {
+        uint32_t startFrame = (uint32_t)(readPosition % buffer->capacityFrames);
+        uint32_t firstFrames = buffer->capacityFrames - startFrame;
+        if(firstFrames > framesToRead) {
+            firstFrames = framesToRead;
+        }
         memcpy(
-            &interleavedSamples[(size_t)firstFrames * buffer->channelCount],
-            buffer->samples,
-            (size_t)(framesToRead - firstFrames) * buffer->channelCount * sizeof(float)
+            interleavedSamples,
+            &buffer->samples[(size_t)startFrame * buffer->channelCount],
+            (size_t)firstFrames * buffer->channelCount * sizeof(float)
         );
+        if(firstFrames < framesToRead) {
+            memcpy(
+                &interleavedSamples[(size_t)firstFrames * buffer->channelCount],
+                buffer->samples,
+                (size_t)(framesToRead - firstFrames) * buffer->channelCount * sizeof(float)
+            );
+        }
     }
 
-    size_t samplesRead = (size_t)framesToRead * buffer->channelCount;
+    uint32_t framesProduced = resample ? frameCount : framesToRead;
+    size_t samplesRead = (size_t)framesProduced * buffer->channelCount;
     size_t requestedSamples = (size_t)frameCount * buffer->channelCount;
     if(samplesRead < requestedSamples) {
         memset(
@@ -509,6 +599,22 @@ uint32_t SRSharedAudioBufferRead(
         memory_order_relaxed
     );
     return framesToRead;
+}
+
+uint32_t SRSharedAudioBufferRead(
+    SRSharedAudioBuffer* buffer,
+    float* interleavedSamples,
+    uint32_t frameCount
+) {
+    return readFrames(buffer, interleavedSamples, frameCount, false);
+}
+
+uint32_t SRSharedAudioBufferReadWithDriftCompensation(
+    SRSharedAudioBuffer* buffer,
+    float* interleavedSamples,
+    uint32_t frameCount
+) {
+    return readFrames(buffer, interleavedSamples, frameCount, true);
 }
 
 void SRSharedAudioBufferSetTargetGain(
@@ -546,6 +652,10 @@ SRSharedAudioMetrics SRSharedAudioBufferGetMetrics(
     const SRSharedAudioBuffer* buffer
 ) {
     SRSharedAudioMetrics metrics = {
+        .writtenFrames = atomic_load_explicit(
+            &buffer->writePosition,
+            memory_order_acquire
+        ),
         .requestedRenderFrames = atomic_load_explicit(
             &buffer->requestedRenderFrames,
             memory_order_relaxed

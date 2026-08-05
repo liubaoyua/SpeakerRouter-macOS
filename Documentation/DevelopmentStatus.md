@@ -12,6 +12,10 @@
   controls.
 - Shared-memory transfer from the virtual output callback to a physical-output
   AUHAL callback without opening an input device.
+- Bounded-latency drift compensation and downstream presentation-latency
+  reporting for devices with independent clocks.
+- Active-AirPods removal pause and guarded reinsertion resume from local
+  Bluetooth proximity advertisements.
 - Failed-route circuit breaker and callback-liveness recovery.
 - Guard helper that restores the last physical output after app failure.
 - Guarded in-app driver installation, update, reinstall, and removal.
@@ -20,9 +24,10 @@
 ## Automated verification
 
 - Routing priority, manual lock, disconnect fallback, volume, persistence, and
-  heartbeat unit tests.
+  heartbeat unit tests, plus AirPods placement and playback-transition tests.
 - Shared-memory token parsing, independent mappings, gain ramp, underflow
-  silence, overrun behavior, and callback-liveness tests.
+  silence, overrun behavior, sustained clock drift, stale-backlog recovery,
+  latency conversion, and callback-liveness tests.
 - Strict C warnings during driver build.
 - Universal driver architecture and deep App bundle signature checks in the
   documented release workflow.
@@ -30,6 +35,7 @@
 ## Manual verification still required
 
 - Representative HDMI/DisplayPort, wired, Bluetooth, USB, and AirPlay devices.
+- AirPods placement behavior across models, firmware versions, and one-ear use.
 - Sleep/wake, login, Core Audio restart, and driver update boundaries.
 - Long-running latency, buffer pressure, and clock-drift behavior.
 - Gatekeeper behavior after Developer ID signing and notarization.

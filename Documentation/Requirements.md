@@ -29,6 +29,12 @@ by the system.
     loop. Retry only after a device change or explicit user action.
 14. Driver installation and removal must validate the expected bundle identifier
     before modifying `/Library/Audio/Plug-Ins/HAL`.
+15. Independent virtual and physical clocks must not accumulate unbounded queued
+    audio. The virtual device must expose downstream presentation latency.
+16. Disconnecting the active headphone output pauses system media before routing
+    falls back to another device.
+17. Removing the active AirPods pauses media only when it was playing. Reinserting
+    them resumes only when SpeakerRouter confirmed that removal caused the pause.
 
 ## Acceptance scenarios
 
@@ -44,6 +50,12 @@ by the system.
 - Quitting or crashing the app leaves macOS with a usable physical output.
 - Normal operation does not request microphone permission or show the recording
   indicator.
+- Long playback through a wireless output remains bounded in latency; pausing
+  does not drain seconds of stale buffered audio.
+- Disconnecting active headphones pauses current media without toggling already
+  paused media back into playback.
+- Removing active AirPods pauses playing media. Reinserting them resumes that
+  playback, but does not resume media that was already paused before removal.
 
 ## Out of scope for the current release
 
