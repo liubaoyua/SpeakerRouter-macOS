@@ -16,10 +16,15 @@
   reporting for devices with independent clocks.
 - Active-AirPods removal pause and guarded reinsertion resume from local
   Bluetooth proximity advertisements.
+- Address-filtered connected-AirPods AACP placement monitoring, with BLE
+  proximity advertisements retained as a fallback.
+- Real-time now-playing state and commands through a bundled BSD MediaRemote
+  Adapter helper, with producer-frame fallback and resume re-pause handling.
 - Failed-route circuit breaker and callback-liveness recovery.
 - Guard helper that restores the last physical output after app failure.
 - Guarded in-app driver installation, update, reinstall, and removal.
 - Reproducible command-line builds with ad-hoc signing.
+- Pinned third-party source and in-bundle BSD license notice.
 
 ## Automated verification
 
@@ -36,6 +41,9 @@
 
 - Representative HDMI/DisplayPort, wired, Bluetooth, USB, and AirPlay devices.
 - AirPods placement behavior across models, firmware versions, and one-ear use.
+- MediaRemote Adapter behavior after macOS updates and with different browser
+  media-session implementations.
+- Stability of the internal `bluetoothd` AACP log format across macOS releases.
 - Sleep/wake, login, Core Audio restart, and driver update boundaries.
 - Long-running latency, buffer pressure, and clock-drift behavior.
 - Gatekeeper behavior after Developer ID signing and notarization.

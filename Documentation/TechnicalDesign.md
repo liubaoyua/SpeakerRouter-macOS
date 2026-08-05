@@ -108,21 +108,32 @@ the same hardware device.
 A SwiftUI/AppKit `MenuBarExtra` window lists online and offline devices, permits
 manual selection and reordering, shows the active output, and controls the
 per-device volume. It starts at login and owns the relay lifecycle. When the
-active headphone route disappears, it dynamically resolves MediaRemote's
-idempotent Pause command before selecting a fallback. macOS has no public API
-for pausing another app; if that runtime symbol is unavailable, routing still
-continues without requesting Accessibility access.
+active headphone route disappears, it sends MediaRemote's idempotent Pause
+command before selecting a fallback. macOS has no public API for querying or
+controlling another app's media session, so routing continues even if media
+control is unavailable and never requests Accessibility access.
 
-While an AirPods output is active, the App uses CoreBluetooth to observe that
-device's local Apple proximity-status advertisements and decodes the two earbud
-placement fields. The first status establishes a baseline. An in-ear to
-out-of-ear transition checks whether the virtual driver's producer frame count
-advanced recently and sends an explicit Pause only while an audio client was
-active. The inverse transition sends Play only if that pause command was
-accepted. This avoids the entitlement-gated MediaRemote playback-state query;
-MediaRemote is used only for explicit Pause and Play commands. Bluetooth denial,
-an unknown advertisement, or missing command symbols disables this convenience
-without affecting the audio route. No advertisement is persisted or transmitted.
+While an AirPods output is active, the App launches a narrowly filtered
+`/usr/bin/log stream` for `bluetoothd` AACP in-ear updates matching the active
+device's Bluetooth address. This connected-device channel reports each bud
+immediately even when macOS does not rebroadcast placement over BLE. CoreBluetooth
+proximity-status advertisements remain a secondary source. An in-ear to
+out-of-ear transition first checks real-time now-playing state supplied by the
+bundled BSD MediaRemote Adapter. The Adapter is loaded by Apple's entitled
+`/usr/bin/perl` process and streams local JSON without artwork to the App. If the
+Adapter is unavailable, the App falls back to whether the virtual driver's
+producer frame count advanced recently. The inverse transition sends Play only
+if SpeakerRouter previously requested Pause, and only after the worn state stays
+stable for 1.25 seconds.
+
+While removal-pause state is active, a new `playing=true` update immediately
+reasserts Pause. This covers clients that acknowledge Pause and then resume. A
+fixed 750 ms retry remains as a fallback. The App never directly calls the
+entitlement-gated asynchronous playback-state function, avoiding its permission
+failure and callback-ABI crash. A changed AACP log format, Bluetooth denial, an
+unknown advertisement, or Adapter failure disables only the corresponding
+convenience path. No placement event, advertisement, or now-playing payload is
+persisted or transmitted.
 
 ### SpeakerRouterGuard
 

@@ -106,6 +106,15 @@ public struct RecentAudioActivityTracker: Sendable {
   }
 }
 
+public enum MediaPlaybackPauseDecision {
+  public static func shouldPause(
+    adapterPlaying: Bool?,
+    fallbackHasRecentAudio: Bool
+  ) -> Bool {
+    adapterPlaying ?? fallbackHasRecentAudio
+  }
+}
+
 public enum AirPodsProximityAdvertisement {
   public static func wearState(from manufacturerData: Data) -> AirPodsWearState? {
     let bytes = [UInt8](manufacturerData)
@@ -127,5 +136,44 @@ public enum AirPodsProximityAdvertisement {
       primaryInEar: primaryLocation == 1,
       secondaryInEar: secondaryLocation == 1
     )
+  }
+}
+
+public enum AirPodsPlacementLogParser {
+  public static func wearState(
+    from eventMessage: String,
+    targetAddress: String
+  ) -> AirPodsWearState? {
+    let message = eventMessage.lowercased()
+    guard message.contains(targetAddress.lowercased()),
+      let primary = placement(
+        in: message,
+        after: "primary bud state = ",
+        before: ", secondary bud state = "
+      ),
+      let secondaryStart = message.range(of: ", secondary bud state = ")?.upperBound
+    else {
+      return nil
+    }
+
+    let secondary = String(message[secondaryStart...])
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    return AirPodsWearState(
+      primaryInEar: primary == "in ear",
+      secondaryInEar: secondary == "in ear"
+    )
+  }
+
+  private static func placement(
+    in message: String,
+    after prefix: String,
+    before suffix: String
+  ) -> String? {
+    guard let start = message.range(of: prefix)?.upperBound,
+      let end = message.range(of: suffix, range: start..<message.endIndex)?.lowerBound
+    else {
+      return nil
+    }
+    return String(message[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
   }
 }

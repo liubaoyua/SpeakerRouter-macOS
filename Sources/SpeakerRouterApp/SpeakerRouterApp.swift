@@ -95,6 +95,9 @@ final class RouterViewModel: ObservableObject {
   private let volumeWatcher = CoreAudioVolumeWatcher()
   private let guardCoordinator = GuardCoordinator()
   private let mediaPauseController = MediaPauseController()
+  private lazy var mediaRemoteAdapter = MediaRemoteAdapterController { [weak self] playing in
+    self?.mediaRemotePlayingChanged(playing)
+  }
   private lazy var airPodsWearMonitor = AirPodsWearMonitor { [weak self] wearState in
     self?.airPodsWearStateChanged(wearState)
   }
@@ -112,6 +115,7 @@ final class RouterViewModel: ObservableObject {
   private var recentAudioActivity = RecentAudioActivityTracker()
   private var airPodsPauseRetryTask: Task<Void, Never>?
   private var airPodsPlayConfirmationTask: Task<Void, Never>?
+  private var lastAdapterPauseReassertion: TimeInterval?
   private var virtualDeviceID: AudioObjectID?
   private var activePhysicalDeviceUID: String?
 
@@ -129,6 +133,7 @@ final class RouterViewModel: ObservableObject {
     )
     state = (try? store.load()) ?? RoutingState()
     Self.shared = self
+    mediaRemoteAdapter.start()
     refreshDriverState()
     configureLaunchAtLogin()
     refresh()
@@ -199,6 +204,7 @@ final class RouterViewModel: ObservableObject {
     relayHealthTimer = nil
     resetRelayHealthTracking()
     stopAirPodsWearMonitoring()
+    mediaRemoteAdapter.stop()
     guardCoordinator.stopCleanly()
     volumeWatcher.stop()
     relayEngine?.stop()
@@ -259,7 +265,7 @@ final class RouterViewModel: ObservableObject {
           currentDevices: snapshot
         )
       {
-        mediaPauseController.pause()
+        sendMediaPause()
       }
       if snapshot.map(\.uid) != liveDevices.map(\.uid) {
         failedRouteAttempt = nil
@@ -628,7 +634,10 @@ final class RouterViewModel: ObservableObject {
       airPodsWearMonitor.stop()
       return
     }
-    airPodsWearMonitor.start(deviceName: device.name)
+    airPodsWearMonitor.start(
+      deviceName: device.name,
+      hardwareUID: device.hardwareUID
+    )
   }
 
   private func stopAirPodsWearMonitoring() {
@@ -662,8 +671,11 @@ final class RouterViewModel: ObservableObject {
         writtenFrames: current.writtenFrames,
         at: now
       )
-      guard recentAudioActivity.hasRecentActivity(at: now),
-        mediaPauseController.pause()
+      let fallbackHasRecentAudio = recentAudioActivity.hasRecentActivity(at: now)
+      guard MediaPlaybackPauseDecision.shouldPause(
+        adapterPlaying: mediaRemoteAdapter.isPlaying,
+        fallbackHasRecentAudio: fallbackHasRecentAudio
+      ), sendMediaPause()
       else {
         airPodsWearBehavior.cancelPauseRequest()
         return
@@ -686,7 +698,7 @@ final class RouterViewModel: ObservableObject {
       else {
         return
       }
-      self.mediaPauseController.pause()
+      self.sendMediaPause()
       self.airPodsPauseRetryTask = nil
     }
   }
@@ -707,7 +719,7 @@ final class RouterViewModel: ObservableObject {
       else {
         return
       }
-      if self.mediaPauseController.play() {
+      if self.sendMediaPlay() {
         self.airPodsWearBehavior.confirmResumedAfterReinsertion()
       }
       self.airPodsPlayConfirmationTask = nil
@@ -717,6 +729,36 @@ final class RouterViewModel: ObservableObject {
   private func cancelAirPodsPlayConfirmation() {
     airPodsPlayConfirmationTask?.cancel()
     airPodsPlayConfirmationTask = nil
+  }
+
+  private func mediaRemotePlayingChanged(_ playing: Bool?) {
+    guard playing == true,
+      airPodsWearBehavior.shouldRemainPausedAfterRemoval,
+      relayEngine?.isRunning == true
+    else {
+      return
+    }
+
+    let now = Date.timeIntervalSinceReferenceDate
+    guard lastAdapterPauseReassertion.map({ now - $0 >= 0.2 }) ?? true else { return }
+    lastAdapterPauseReassertion = now
+    _ = sendMediaPause()
+  }
+
+  @discardableResult
+  private func sendMediaPause() -> Bool {
+    if mediaRemoteAdapter.pause() {
+      return true
+    }
+    return mediaPauseController.pause()
+  }
+
+  @discardableResult
+  private func sendMediaPlay() -> Bool {
+    if mediaRemoteAdapter.play() {
+      return true
+    }
+    return mediaPauseController.play()
   }
 
 }

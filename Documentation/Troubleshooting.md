@@ -49,10 +49,20 @@ if macOS still has the previous Bluetooth route cached.
 4. The placement advertisement is not a public Apple API. An unsupported model
    safely continues routing audio without automatic media control; include the
    AirPods model and firmware version in a bug report.
-5. Build 24 and later determine recent playback from the virtual audio producer.
-   Build 23 can crash on removal because its private playback-state query is
-   rejected by current macOS releases. Build 25 also retries Pause once for
-   clients that briefly acknowledge the first command and immediately resume.
+5. Build 27 and later use the bundled MediaRemote Adapter for real-time playback
+   state and fall back to virtual-audio producer progress if it stops working.
+   Build 23 can crash because it calls the entitlement-gated state query
+   directly. Build 25 and later also retry Pause for clients that briefly
+   acknowledge the first command and immediately resume.
+6. A locally built App must contain both
+   `Contents/Frameworks/MediaRemoteAdapter.framework` and
+   `Contents/Resources/MediaRemoteAdapter/mediaremote-adapter.pl`. Initialize
+   the git submodule and rebuild if either resource is missing.
+7. Build 28 also observes address-filtered connected-AirPods AACP placement
+   events because macOS does not reliably rebroadcast single-bud changes over
+   BLE. If a future macOS release changes that internal log format, capture the
+   exact `bluetoothd` in-ear event and report it; proximity advertisements remain
+   available as a fallback.
 
 ## Safe diagnostic information for bug reports
 

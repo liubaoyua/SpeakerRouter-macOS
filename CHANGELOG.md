@@ -19,6 +19,12 @@ All notable changes are documented in this file.
   clients such as Chrome that briefly acknowledge Pause and immediately resume.
 - Require a stable worn-again state before resuming playback, so an AirPods
   proximity-sensor rebound cannot immediately cancel a removal pause.
+- Read real-time playback state through the BSD-licensed MediaRemote Adapter
+  helper, re-pause clients that resume after removal, and retain audio-frame
+  activity as a fallback when the private framework workaround is unavailable.
+- Observe connected-AirPods AACP placement events through a narrowly filtered
+  system log stream, retaining proximity advertisements as a fallback when
+  connected-device placement is not rebroadcast over BLE.
 
 ## 0.5.1 - 2026-08-03
 

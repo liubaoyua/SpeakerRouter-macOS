@@ -145,6 +145,32 @@ struct RoutingStateTests {
     #expect(AirPodsProximityAdvertisement.wearState(from: Data([0x4C, 0x00])) == nil)
   }
 
+  @Test("Connected AirPods placement log events decode only for the active address")
+  func airPodsPlacementLogParsing() {
+    let address = "C4:B3:49:90:52:ED"
+    let oneWorn =
+      "received in-ear state update from device C4:B3:49:90:52:ED "
+      + "primary bud state = in ear, secondary bud state = out of ear"
+    let neitherWorn =
+      "received in-ear state update from device C4:B3:49:90:52:ED "
+      + "primary bud state = out of ear, secondary bud state = in case"
+
+    #expect(
+      AirPodsPlacementLogParser.wearState(from: oneWorn, targetAddress: address)
+        == AirPodsWearState(primaryInEar: true, secondaryInEar: false)
+    )
+    #expect(
+      AirPodsPlacementLogParser.wearState(from: neitherWorn, targetAddress: address)
+        == AirPodsWearState(primaryInEar: false, secondaryInEar: false)
+    )
+    #expect(
+      AirPodsPlacementLogParser.wearState(
+        from: oneWorn,
+        targetAddress: "00:11:22:33:44:55"
+      ) == nil
+    )
+  }
+
   @Test("AirPods resume only after a confirmed removal pause")
   func airPodsWearPlaybackPolicy() {
     var behavior = AirPodsWearPlaybackBehavior()
@@ -207,6 +233,34 @@ struct RoutingStateTests {
     #expect(behavior.observe(oneWorn) == nil)
     #expect(behavior.shouldRemainPausedAfterRemoval)
     #expect(behavior.observe(bothWorn) == .requestPlay)
+  }
+
+  @Test("MediaRemote state wins, with recent audio used only when it is unavailable")
+  func mediaPlaybackPauseDecision() {
+    #expect(
+      MediaPlaybackPauseDecision.shouldPause(
+        adapterPlaying: true,
+        fallbackHasRecentAudio: false
+      )
+    )
+    #expect(
+      !MediaPlaybackPauseDecision.shouldPause(
+        adapterPlaying: false,
+        fallbackHasRecentAudio: true
+      )
+    )
+    #expect(
+      MediaPlaybackPauseDecision.shouldPause(
+        adapterPlaying: nil,
+        fallbackHasRecentAudio: true
+      )
+    )
+    #expect(
+      !MediaPlaybackPauseDecision.shouldPause(
+        adapterPlaying: nil,
+        fallbackHasRecentAudio: false
+      )
+    )
   }
 
   @Test("Device volume is remembered and clamped")

@@ -31,6 +31,7 @@ SpeakerRouter 是一个 macOS 菜单栏应用。它把系统声音发送到优�
 
 - macOS 14 或更高版本。
 - Xcode 26 或兼容 Swift 6.2 的工具链。
+- CMake 3.15 或更高版本，用于构建 MediaRemote Adapter。
 - Apple Silicon 或 Intel Mac。
 - 安装驱动时需要管理员权限。
 - AirPods 佩戴检测需要蓝牙权限，不需要麦克风权限。
@@ -53,6 +54,14 @@ SpeakerRouter 虚拟输出
 
 ## 构建与测试
 
+首次克隆时需要同时获取子模块：
+
+```sh
+git clone --recurse-submodules https://github.com/liubaoyua/SpeakerRouter-macOS.git
+```
+
+已有工作区可以运行 `git submodule update --init --recursive`。
+
 ```sh
 swift test
 ./Scripts/build-driver.sh
@@ -64,8 +73,9 @@ swift test
 - App：`DerivedData/Products/SpeakerRouter.app`
 - 驱动：`DerivedData/ManualBuild/SpeakerRouterHAL.driver`
 
-`build-app.sh` 会构建通用架构驱动、App 和崩溃守护进程，并对最终 App bundle
-执行 ad-hoc 签名。构建过程不会安装 App 或修改系统驱动目录。
+`build-app.sh` 会构建通用架构驱动、BSD-3-Clause MediaRemote Adapter、App 和
+崩溃守护进程，并对最终 App bundle 执行 ad-hoc 签名。构建过程不会安装 App 或
+修改系统驱动目录。
 
 ## 安装和使用
 
@@ -105,9 +115,13 @@ SpeakerRouter 不包含网络请求、遥测或崩溃上报。设备顺序、手
 守护进程的心跳文件位于同一目录。共享音频内存使用一次性随机名称，驱动成功映射
 后名称立即解除链接。
 
-AirPods 佩戴检测只在 AirPods 是当前物理输出时扫描本机蓝牙广播，并在本机解析
-左右耳 placement；广播内容不会保存或上传。拒绝蓝牙权限只会停用摘下暂停与戴上
-继续，不影响音频路由。
+AirPods 佩戴检测只在 AirPods 是当前物理输出时运行。App 按当前设备地址窄过滤
+`bluetoothd` 的本机 AACP placement 日志，并保留蓝牙 proximity 广播作为回退；
+这些内容不会保存或上传。拒绝蓝牙权限会停用广播回退，不影响音频路由。
+
+播放状态由 App 内置的 MediaRemote Adapter helper 在本机读取。它使用 macOS
+自带的 `/usr/bin/perl` 加载辅助 framework，只向 SpeakerRouter 输出不含封面的
+本地 JSON 状态，不发起网络请求。Adapter 失效时自动回退到虚拟音频帧活动判断。
 
 ## 项目结构
 
@@ -116,6 +130,7 @@ AirPods 佩戴检测只在 AirPods 是当前物理输出时扫描本机蓝牙广
 - `Sources/SpeakerRouterAudioSupport`：实时安全的共享内存环形缓冲。
 - `Sources/SpeakerRouterGuard`：异常退出后的物理输出恢复。
 - `Driver/SpeakerRouterHAL`：基于 Apple NullAudio 示例的 AudioServerPlugIn。
+- `ThirdParty/mediaremote-adapter`：固定版本的 BSD MediaRemote Adapter 子模块。
 - `Tests`：路由策略、持久化和共享传输测试。
 - `Documentation`：需求、技术设计、状态和故障排查。
 
@@ -124,10 +139,12 @@ AirPods 佩戴检测只在 AirPods 是当前物理输出时扫描本机蓝牙广
 - 当前固定请求 48 kHz；显式的跨设备采样率转换尚未实现。
 - AirPlay、蓝牙和部分 USB 设备的热插拔行为依赖对应 Core Audio 驱动。
 - 不同 AirPods 型号和蓝牙编码模式仍需要持续进行真机延迟验证。
-- 耳机断开暂停使用运行时加载的 macOS MediaRemote 接口；系统不提供对应的
-  公共跨 App 暂停 API，未来 macOS 版本若移除该接口会安全退化为仅切换输出。
+- 播放状态和媒体控制依赖非公开的 macOS MediaRemote framework，并通过系统
+  Perl helper 访问；未来系统版本仍可能使 Adapter 失效，此时只保留音频帧回退。
 - AirPods placement 广播格式不是 Apple 的公共 API；已验证 AirPods 4，但其他
   型号和未来固件仍需真机验证，解析失败时会安全退化为不控制播放。
+- 已连接 AirPods 的单耳 placement 补充来源依赖 `bluetoothd` 的内部日志格式；
+  macOS 更新若改变该格式，仍会回退到 proximity 广播。
 - 公共二进制发布前仍需 Developer ID 签名和 notarization。
 
 遇到无声、驱动状态不一致或菜单栏未出现时，请先查看
@@ -144,3 +161,5 @@ AirPods 佩戴检测只在 AirPods 是当前物理输出时扫描本机蓝牙广
 除特别说明外，项目使用 [MIT License](LICENSE)。
 `Driver/SpeakerRouterHAL` 派生自 Apple 的 NullAudio 示例，并保留该目录内的
 [LICENSE.txt](Driver/SpeakerRouterHAL/LICENSE.txt)。
+
+第三方组件及其许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
