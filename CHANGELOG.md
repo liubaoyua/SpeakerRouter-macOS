@@ -17,8 +17,8 @@ All notable changes are documented in this file.
   playback from virtual-audio producer progress, preventing an AirPods-removal crash.
 - Reassert Pause once after 750 ms while an AirPod remains removed, covering media
   clients such as Chrome that briefly acknowledge Pause and immediately resume.
-- Require a stable worn-again state before resuming playback, so an AirPods
-  proximity-sensor rebound cannot immediately cancel a removal pause.
+- Resume playback immediately after AirPods report a worn-again transition,
+  while still requiring SpeakerRouter to have paused it after removal.
 - Read real-time playback state through the BSD-licensed MediaRemote Adapter
   helper, re-pause clients that resume after removal, and retain audio-frame
   activity as a fallback when the private framework workaround is unavailable.

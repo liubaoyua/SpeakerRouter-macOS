@@ -122,9 +122,8 @@ out-of-ear transition first checks real-time now-playing state supplied by the
 bundled BSD MediaRemote Adapter. The Adapter is loaded by Apple's entitled
 `/usr/bin/perl` process and streams local JSON without artwork to the App. If the
 Adapter is unavailable, the App falls back to whether the virtual driver's
-producer frame count advanced recently. The inverse transition sends Play only
-if SpeakerRouter previously requested Pause, and only after the worn state stays
-stable for 1.25 seconds.
+producer frame count advanced recently. The inverse transition sends Play
+immediately, but only if SpeakerRouter previously requested Pause.
 
 While removal-pause state is active, a new `playing=true` update immediately
 reasserts Pause. This covers clients that acknowledge Pause and then resume. A

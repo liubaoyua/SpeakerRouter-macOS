@@ -114,7 +114,6 @@ final class RouterViewModel: ObservableObject {
   private var airPodsWearBehavior = AirPodsWearPlaybackBehavior()
   private var recentAudioActivity = RecentAudioActivityTracker()
   private var airPodsPauseRetryTask: Task<Void, Never>?
-  private var airPodsPlayConfirmationTask: Task<Void, Never>?
   private var lastAdapterPauseReassertion: TimeInterval?
   private var virtualDeviceID: AudioObjectID?
   private var activePhysicalDeviceUID: String?
@@ -626,7 +625,6 @@ final class RouterViewModel: ObservableObject {
 
   private func startAirPodsWearMonitoring(for device: OutputDevice) {
     cancelAirPodsPauseRetry()
-    cancelAirPodsPlayConfirmation()
     airPodsWearBehavior.reset()
     guard device.kind == .headphones,
       device.name.localizedCaseInsensitiveContains("airpods")
@@ -642,15 +640,11 @@ final class RouterViewModel: ObservableObject {
 
   private func stopAirPodsWearMonitoring() {
     cancelAirPodsPauseRetry()
-    cancelAirPodsPlayConfirmation()
     airPodsWearBehavior.reset()
     airPodsWearMonitor.stop()
   }
 
   private func airPodsWearStateChanged(_ wearState: AirPodsWearState) {
-    // Every real sensor transition invalidates a pending "worn again" decision.
-    // In particular, an out -> in -> out optical-sensor bounce must not resume media.
-    cancelAirPodsPlayConfirmation()
     guard let relayEngine, relayEngine.isRunning,
       let activePhysicalDeviceUID,
       liveDevices.contains(where: {
@@ -684,7 +678,9 @@ final class RouterViewModel: ObservableObject {
       scheduleAirPodsPauseRetry()
     case .requestPlay:
       cancelAirPodsPauseRetry()
-      scheduleAirPodsPlayConfirmation()
+      if sendMediaPlay() {
+        airPodsWearBehavior.confirmResumedAfterReinsertion()
+      }
     }
   }
 
@@ -706,29 +702,6 @@ final class RouterViewModel: ObservableObject {
   private func cancelAirPodsPauseRetry() {
     airPodsPauseRetryTask?.cancel()
     airPodsPauseRetryTask = nil
-  }
-
-  private func scheduleAirPodsPlayConfirmation() {
-    airPodsPlayConfirmationTask = Task { [weak self] in
-      // AirPods proximity broadcasts can briefly flip back to "in ear" after
-      // removal. Only resume after that state has remained stable.
-      try? await Task.sleep(for: .milliseconds(1_250))
-      guard !Task.isCancelled, let self,
-        self.airPodsWearBehavior.shouldRemainPausedAfterRemoval,
-        self.relayEngine?.isRunning == true
-      else {
-        return
-      }
-      if self.sendMediaPlay() {
-        self.airPodsWearBehavior.confirmResumedAfterReinsertion()
-      }
-      self.airPodsPlayConfirmationTask = nil
-    }
-  }
-
-  private func cancelAirPodsPlayConfirmation() {
-    airPodsPlayConfirmationTask?.cancel()
-    airPodsPlayConfirmationTask = nil
   }
 
   private func mediaRemotePlayingChanged(_ playing: Bool?) {
