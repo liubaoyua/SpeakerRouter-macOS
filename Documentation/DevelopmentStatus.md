@@ -19,7 +19,7 @@
 - Address-filtered connected-AirPods AACP placement monitoring, with BLE
   proximity advertisements retained as a fallback.
 - Real-time now-playing state and commands through a bundled BSD MediaRemote
-  Adapter helper, with producer-frame fallback and resume re-pause handling.
+  Adapter helper, with producer-frame fallback and a one-shot Pause retry.
 - Failed-route circuit breaker and callback-liveness recovery.
 - Guard helper that restores the last physical output after app failure.
 - Guarded in-app driver installation, update, reinstall, and removal.

@@ -125,14 +125,16 @@ Adapter is unavailable, the App falls back to whether the virtual driver's
 producer frame count advanced recently. The inverse transition sends Play
 immediately, but only if SpeakerRouter previously requested Pause.
 
-While removal-pause state is active, a new `playing=true` update immediately
-reasserts Pause. This covers clients that acknowledge Pause and then resume. A
-fixed 750 ms retry remains as a fallback. The App never directly calls the
-entitlement-gated asynchronous playback-state function, avoiding its permission
-failure and callback-ABI crash. A changed AACP log format, Bluetooth denial, an
-unknown advertisement, or Adapter failure disables only the corresponding
-convenience path. No placement event, advertisement, or now-playing payload is
-persisted or transmitted.
+A fixed 750 ms retry covers clients that briefly acknowledge Pause and then
+resume. After that one-shot retry, SpeakerRouter does not continuously enforce
+Pause, so the user can explicitly resume playback while wearing only one bud.
+A later `playing=true` state clears the removal-pause marker without sending
+another command, allowing removal of the remaining bud to request Pause again.
+The App never directly calls the entitlement-gated asynchronous playback-state
+function, avoiding its permission failure and callback-ABI crash. A changed
+AACP log format, Bluetooth denial, an unknown advertisement, or Adapter failure
+disables only the corresponding convenience path. No placement event,
+advertisement, or now-playing payload is persisted or transmitted.
 
 ### SpeakerRouterGuard
 

@@ -20,8 +20,9 @@ All notable changes are documented in this file.
 - Resume playback immediately after AirPods report a worn-again transition,
   while still requiring SpeakerRouter to have paused it after removal.
 - Read real-time playback state through the BSD-licensed MediaRemote Adapter
-  helper, re-pause clients that resume after removal, and retain audio-frame
-  activity as a fallback when the private framework workaround is unavailable.
+  helper, retain a one-shot Pause retry, allow explicit playback with one bud,
+  reset removal state after that explicit override, and retain audio-frame
+  activity as a fallback when the helper is unavailable.
 - Observe connected-AirPods AACP placement events through a narrowly filtered
   system log stream, retaining proximity advertisements as a fallback when
   connected-device placement is not rebroadcast over BLE.

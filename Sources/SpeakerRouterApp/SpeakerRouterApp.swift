@@ -114,7 +114,6 @@ final class RouterViewModel: ObservableObject {
   private var airPodsWearBehavior = AirPodsWearPlaybackBehavior()
   private var recentAudioActivity = RecentAudioActivityTracker()
   private var airPodsPauseRetryTask: Task<Void, Never>?
-  private var lastAdapterPauseReassertion: TimeInterval?
   private var virtualDeviceID: AudioObjectID?
   private var activePhysicalDeviceUID: String?
 
@@ -707,15 +706,15 @@ final class RouterViewModel: ObservableObject {
   private func mediaRemotePlayingChanged(_ playing: Bool?) {
     guard playing == true,
       airPodsWearBehavior.shouldRemainPausedAfterRemoval,
+      airPodsPauseRetryTask == nil,
       relayEngine?.isRunning == true
     else {
       return
     }
 
-    let now = Date.timeIntervalSinceReferenceDate
-    guard lastAdapterPauseReassertion.map({ now - $0 >= 0.2 }) ?? true else { return }
-    lastAdapterPauseReassertion = now
-    _ = sendMediaPause()
+    // The one-shot retry window has ended. Treat later playback as an explicit
+    // user override so removing the remaining bud can request Pause again.
+    airPodsWearBehavior.confirmResumedAfterReinsertion()
   }
 
   @discardableResult
