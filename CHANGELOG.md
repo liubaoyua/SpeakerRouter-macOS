@@ -2,6 +2,12 @@
 
 All notable changes are documented in this file.
 
+## Unreleased
+
+- Add per-app volume, mute, and reset in the menu. Apply 0–200% gain before mixing,
+  remember settings by application bundle ID, and protect the physical output
+  from peaks when boosted apps play together. Requires a driver update.
+
 ## 0.6.0 - 2026-08-04
 
 - Added bounded-latency clock-drift compensation for independent virtual and

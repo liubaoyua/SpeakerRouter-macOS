@@ -7,9 +7,10 @@ macOS applications and system sounds
               |
               v
 SpeakerRouter virtual output (system default + system sounds)
+  per-client gain -> HAL mix
               |
               v
-private shared memory -> gain/mute -> output AUHAL -> selected physical output
+private shared memory -> master gain/mute -> peak limiter -> output AUHAL -> selected physical output
 ```
 
 The virtual device exposes standard primary-volume and mute controls. This lets
@@ -32,6 +33,16 @@ mix into a single-producer/single-consumer ring in a shared memory mapping
 created by the app. A declared `CFString` custom device property carries a
 one-time random mapping token to the remote driver service; the app unlinks the
 name after the driver maps it.
+
+`ProcessOutput` applies each client's gain in place before HAL mixes the
+clients. It observes signal before applying gain so a muted app remains visible
+while it continues to play. `WriteMix` still writes the mixed buffer directly to
+the same shared ring. The control property reports activity and accepts gain
+changes by registration token so an old update cannot affect a reused client ID.
+The app polls outside the real-time path, resolves helper ownership by PID, and
+applies the saved app setting to the current clients. It never groups unrelated
+clients by a shared WebKit helper bundle ID. If macOS does not provide a usable
+responsible PID or an embedded helper path, that client remains separate.
 
 The driver is installed under `/Library/Audio/Plug-Ins/HAL`. Local builds are
 universal (`arm64` and `x86_64`) and ad-hoc signed. Public binary distribution
@@ -59,6 +70,9 @@ Underruns output silence. The physical callback keeps the shared ring inside a
 bounded low-latency window. Normal clock error is absorbed by consuming one
 extra or one fewer source frame per callback with linear interpolation; an
 already stale multi-second backlog is discarded to the current latency target.
+After master gain, a stereo-linked limiter protects the physical output from
+overload, with immediate attack, a short hold for bass peaks, gradual release
+and no added audio buffering.
 The virtual driver reports the physical device, stream, safety, buffer, and
 relay latency so media clients can account for wireless presentation delay.
 The shared header otherwise tracks only the physical render callback frame
@@ -155,6 +169,8 @@ The initial implementation stores a versioned JSON-compatible configuration:
 - last known usable physical output UID.
 
 Writes are atomic and occur only outside audio callbacks.
+The App stores individual app volume and mute preferences separately in
+`UserDefaults`, keyed by the owning application's bundle ID.
 
 ## Verification strategy
 
@@ -164,3 +180,12 @@ state transitions, volume clamping, and persistence. Core
 Audio integration tests use a fake device repository first. Manual acceptance
 on the Mac covers HDMI/DP, wired, Bluetooth, USB, media keys, sleep/wake,
 hot-plugging, app quit, and forced termination.
+
+`Scripts/test-driver.sh` loads a freshly built HAL bundle in a test process and
+exercises two distinct clients with the same helper bundle ID, a large write
+to the relay ring, and overload protection. For hardware acceptance, update the
+driver from the new app, play 红果短剧 and another app at the same time, and
+raise only 红果短剧 from 100% to 150% with both sources below the peak limit.
+Check mute, reset, device switching, and the system volume keys on AirPods and
+Mac speakers. With both apps set high, listen for clipping or pumping; repeat
+红果短剧 playback on AirPods long enough to catch the previous large-batch stutter.

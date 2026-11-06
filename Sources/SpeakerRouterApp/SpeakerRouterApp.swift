@@ -89,6 +89,7 @@ final class RouterViewModel: ObservableObject {
   @Published private(set) var driverState: DriverInstallationState = .checking
   @Published var lastError: String?
 
+  let appVolumes = AppVolumeController()
   private let repository = CoreAudioDeviceRepository()
   private let watcher = CoreAudioDeviceWatcher()
   private let systemController = CoreAudioSystemController()
@@ -114,7 +115,9 @@ final class RouterViewModel: ObservableObject {
   private var airPodsWearBehavior = AirPodsWearPlaybackBehavior()
   private var recentAudioActivity = RecentAudioActivityTracker()
   private var airPodsPauseRetryTask: Task<Void, Never>?
-  private var virtualDeviceID: AudioObjectID?
+  private var virtualDeviceID: AudioObjectID? {
+    didSet { appVolumes.attach(virtualDeviceID) }
+  }
   private var activePhysicalDeviceUID: String?
 
   init() {
@@ -331,6 +334,7 @@ final class RouterViewModel: ObservableObject {
         relayEngine.stop()
         restoreFallbackPhysicalOutput()
         stopAirPodsWearMonitoring()
+        virtualDeviceID = nil
         activePhysicalDeviceUID = nil
         resetRelayHealthTracking()
         routeStatus = "没有可用的物理输出"
@@ -569,6 +573,7 @@ final class RouterViewModel: ObservableObject {
       return
     }
 
+    appVolumes.refresh()
     let current = relayEngine.statistics()
     recentAudioActivity.observe(
       writtenFrames: current.writtenFrames,
@@ -785,6 +790,10 @@ struct RouterMenuView: View {
           deviceRow(row, index: index)
         }
       }
+
+      Divider()
+
+      AppVolumeSection(controller: model.appVolumes)
 
       Divider()
 

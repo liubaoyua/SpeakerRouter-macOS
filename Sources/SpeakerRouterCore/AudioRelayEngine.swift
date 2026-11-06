@@ -45,6 +45,7 @@ public final class AudioRelayEngine: @unchecked Sendable {
   private var sharedBuffer: OpaquePointer?
   private var transportDeviceID: AudioObjectID?
   private var outputUnit: AudioUnit?
+  private var peakLimiter = SRPeakLimiter()
   private(set) public var isRunning = false
 
   public init() throws {}
@@ -105,6 +106,7 @@ public final class AudioRelayEngine: @unchecked Sendable {
       )
 
       try check(AudioUnitInitialize(output), "Initialize relay output")
+      SRPeakLimiterReset(&peakLimiter, sampleRate)
       try check(AudioOutputUnitStart(output), "Start relay output")
       isRunning = true
       SRSharedAudioBufferSetTargetGain(buffer, gain)
@@ -185,6 +187,7 @@ public final class AudioRelayEngine: @unchecked Sendable {
     }
     let samples = data.assumingMemoryBound(to: Float.self)
     _ = SRSharedAudioBufferReadWithDriftCompensation(sharedBuffer, samples, frameCount)
+    SRPeakLimiterProcessStereo(&peakLimiter, samples, frameCount)
     return noErr
   }
 

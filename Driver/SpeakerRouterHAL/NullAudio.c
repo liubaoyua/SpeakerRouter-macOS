@@ -16,6 +16,8 @@ A minimal user-space driver.
 //	System Includes
 #include <CoreAudio/AudioServerPlugIn.h>
 #include "SRSharedAudioTransport.h"
+#include "SRAppVolume.h"
+#include "SRClientVolumes.h"
 #include <dispatch/dispatch.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
@@ -531,13 +533,6 @@ Done:
 
 static OSStatus	NullAudio_AddDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo* inClientInfo)
 {
-	//	This method is used to inform the driver about a new client that is using the given device.
-	//	This allows the device to act differently depending on who the client is. This driver does
-	//	not need to track the clients using the device, so we just check the arguments and return
-	//	successfully.
-	
-	#pragma unused(inClientInfo)
-	
 	//	declare the local variables
 	OSStatus theAnswer = 0;
 	
@@ -545,24 +540,24 @@ static OSStatus	NullAudio_AddDeviceClient(AudioServerPlugInDriverRef inDriver, A
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_AddDeviceClient: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_AddDeviceClient: bad device ID");
 
+	FailWithAction(inClientInfo == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "NullAudio_AddDeviceClient: missing client");
+	SRClientVolumesAdd(inClientInfo);
+
 Done:
 	return theAnswer;
 }
 
 static OSStatus	NullAudio_RemoveDeviceClient(AudioServerPlugInDriverRef inDriver, AudioObjectID inDeviceObjectID, const AudioServerPlugInClientInfo* inClientInfo)
 {
-	//	This method is used to inform the driver about a client that is no longer using the given
-	//	device. This driver does not track clients, so we just check the arguments and return
-	//	successfully.
-	
-	#pragma unused(inClientInfo)
-	
 	//	declare the local variables
 	OSStatus theAnswer = 0;
 	
 	//	check the arguments
 	FailWithAction(inDriver != gAudioServerPlugInDriverRef, theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_RemoveDeviceClient: bad driver reference");
 	FailWithAction(inDeviceObjectID != kObjectID_Device, theAnswer = kAudioHardwareBadObjectError, Done, "NullAudio_RemoveDeviceClient: bad device ID");
+
+	FailWithAction(inClientInfo == NULL, theAnswer = kAudioHardwareIllegalOperationError, Done, "NullAudio_RemoveDeviceClient: missing client");
+	SRClientVolumesRemove(inClientInfo->mClientID);
 
 Done:
 	return theAnswer;
@@ -1867,6 +1862,7 @@ static Boolean	NullAudio_HasDeviceProperty(AudioServerPlugInDriverRef inDriver, 
 		case kAudioDevicePropertyZeroTimeStampPeriod:
 		case kAudioDevicePropertyIcon:
 		case kAudioDevicePropertyStreams:
+		case SRAppVolumePropertySelector:
 		case SRSharedAudioTransportPropertySelector:
 			theAnswer = true;
 			break;
@@ -1941,6 +1937,7 @@ static OSStatus	NullAudio_IsDevicePropertySettable(AudioServerPlugInDriverRef in
 			break;
 		
 		case kAudioDevicePropertyNominalSampleRate:
+		case SRAppVolumePropertySelector:
 		case SRSharedAudioTransportPropertySelector:
 			*outIsSettable = true;
 			break;
@@ -2016,7 +2013,7 @@ static OSStatus	NullAudio_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
 			break;
 
 		case kAudioObjectPropertyCustomPropertyInfoList:
-			*outDataSize = sizeof(AudioServerPlugInCustomPropertyInfo);
+			*outDataSize = 2 * sizeof(AudioServerPlugInCustomPropertyInfo);
 			break;
 
 		case kAudioDevicePropertyDeviceUID:
@@ -2110,6 +2107,10 @@ static OSStatus	NullAudio_GetDevicePropertyDataSize(AudioServerPlugInDriverRef i
 
 		case kAudioDevicePropertyIcon:
 			*outDataSize = sizeof(CFURLRef);
+			break;
+
+		case SRAppVolumePropertySelector:
+			*outDataSize = sizeof(CFPropertyListRef);
 			break;
 
 		case SRSharedAudioTransportPropertySelector:
@@ -2281,12 +2282,18 @@ static OSStatus	NullAudio_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			break;
 
 		case kAudioObjectPropertyCustomPropertyInfoList:
-			FailWithAction(inDataSize < sizeof(AudioServerPlugInCustomPropertyInfo), theAnswer = kAudioHardwareBadPropertySizeError, Done, "NullAudio_GetDevicePropertyData: not enough space for custom property info");
-			((AudioServerPlugInCustomPropertyInfo*)outData)->mSelector = SRSharedAudioTransportPropertySelector;
-			((AudioServerPlugInCustomPropertyInfo*)outData)->mPropertyDataType = kAudioServerPlugInCustomPropertyDataTypeCFString;
-			((AudioServerPlugInCustomPropertyInfo*)outData)->mQualifierDataType = kAudioServerPlugInCustomPropertyDataTypeNone;
-			*outDataSize = sizeof(AudioServerPlugInCustomPropertyInfo);
+		{
+			const AudioServerPlugInCustomPropertyInfo properties[] = {
+				{ SRSharedAudioTransportPropertySelector, kAudioServerPlugInCustomPropertyDataTypeCFString,
+				  kAudioServerPlugInCustomPropertyDataTypeNone },
+				{ SRAppVolumePropertySelector, kAudioServerPlugInCustomPropertyDataTypeCFPropertyList,
+				  kAudioServerPlugInCustomPropertyDataTypeNone }
+			};
+			FailWithAction(inDataSize < sizeof(properties), theAnswer = kAudioHardwareBadPropertySizeError, Done, "NullAudio_GetDevicePropertyData: not enough space for custom property info");
+			memcpy(outData, properties, sizeof(properties));
+			*outDataSize = sizeof(properties);
 			break;
+		}
 
 		case kAudioDevicePropertyDeviceUID:
 			//	This is a CFString that is a persistent token that can identify the same
@@ -2599,6 +2606,12 @@ static OSStatus	NullAudio_GetDevicePropertyData(AudioServerPlugInDriverRef inDri
 			}
 			break;
 
+		case SRAppVolumePropertySelector:
+			FailWithAction(inDataSize < sizeof(CFPropertyListRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "NullAudio_GetDevicePropertyData: wrong App volume snapshot size");
+			*((CFPropertyListRef*)outData) = SRClientVolumesCopySnapshot();
+			*outDataSize = sizeof(CFPropertyListRef);
+			break;
+
 		case SRSharedAudioTransportPropertySelector:
 			FailWithAction(inDataSize < sizeof(CFStringRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "NullAudio_GetDevicePropertyData: not enough space for shared transport status");
 			*((CFStringRef*)outData) = CFSTR("");
@@ -2662,6 +2675,11 @@ static OSStatus	NullAudio_SetDevicePropertyData(AudioServerPlugInDriverRef inDri
 				theNewSampleRate = (UInt64)theOldSampleRate;
 				dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{ gPlugIn_Host->RequestDeviceConfigurationChange(gPlugIn_Host, kObjectID_Device, theNewSampleRate, NULL); });
 			}
+			break;
+
+		case SRAppVolumePropertySelector:
+			FailWithAction(inDataSize != sizeof(CFPropertyListRef), theAnswer = kAudioHardwareBadPropertySizeError, Done, "NullAudio_SetDevicePropertyData: wrong App volume command size");
+			theAnswer = SRClientVolumesSetTargets(*((const CFPropertyListRef*)inData));
 			break;
 
 		case SRSharedAudioTransportPropertySelector:
@@ -4147,7 +4165,6 @@ static OSStatus	NullAudio_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjec
 	//	This call tells the device that the client has stopped IO. The driver can stop the hardware
 	//	once all clients have stopped.
 	
-	#pragma unused(inClientID)
 	
 	//	declare the local variables
 	OSStatus theAnswer = 0;
@@ -4180,6 +4197,11 @@ static OSStatus	NullAudio_StopIO(AudioServerPlugInDriverRef inDriver, AudioObjec
 	//	unlock the state lock
 	pthread_mutex_unlock(&gPlugIn_StateMutex);
 	
+	if(theAnswer == noErr)
+	{
+		SRClientVolumesStop(inClientID);
+	}
+
 Done:
 	return theAnswer;
 }
@@ -4261,6 +4283,7 @@ static OSStatus	NullAudio_WillDoIOOperation(AudioServerPlugInDriverRef inDriver,
 			willDoInPlace = true;
 			break;
 
+		case kAudioServerPlugInIOOperationProcessOutput:
 		case kAudioServerPlugInIOOperationWriteMix:
 			willDo = true;
 			willDoInPlace = true;
@@ -4305,7 +4328,7 @@ static OSStatus	NullAudio_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
 	//	Write the fully mixed virtual output into the app's preallocated shared ring. The app's
 	//	physical-output callback is the sole reader. No locks or allocation occur on this path.
 	
-	#pragma unused(inClientID, inIOCycleInfo, ioSecondaryBuffer)
+	#pragma unused(inIOCycleInfo, ioSecondaryBuffer)
 	
 	//	declare the local variables
 	OSStatus theAnswer = 0;
@@ -4318,7 +4341,11 @@ static OSStatus	NullAudio_DoIOOperation(AudioServerPlugInDriverRef inDriver, Aud
 
 	Float32* theSamples = (Float32*)ioMainBuffer;
 
-	if(inOperationID == kAudioServerPlugInIOOperationWriteMix)
+	if(inOperationID == kAudioServerPlugInIOOperationProcessOutput && inStreamObjectID == kObjectID_Stream_Output)
+	{
+		SRClientVolumesProcess(inClientID, theSamples, inIOBufferFrameSize);
+	}
+	else if(inOperationID == kAudioServerPlugInIOOperationWriteMix)
 	{
 		SRSharedAudioBuffer* theSharedBuffer = atomic_load_explicit(
 			&gSharedAudioBuffer,

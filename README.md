@@ -18,6 +18,8 @@ SpeakerRouter 是一个 macOS 菜单栏应用。它把系统声音发送到优�
 - 为新设备提供默认分类优先级，并允许手动调整设备顺序。
 - 手动选择会保持到该设备断开；断开后恢复自动选择。
 - 分设备记忆音量，支持系统音量键、静音键和原生音量 HUD。
+- 「应用音量」列出正在通过 SpeakerRouter 播放的应用。每个应用可独立调到
+  0–200%、静音或恢复到 100%。系统音量键仍调节最终输出的总音量。
 - 通过虚拟输出设备和共享内存转发系统混音，不打开麦克风输入。
 - App 异常退出或心跳停止时，守护进程恢复最近可用的物理输出。
 - 自动校正虚拟设备与物理设备的时钟漂移，并限制排队音频的最大延迟。
@@ -42,10 +44,10 @@ SpeakerRouter 是一个 macOS 菜单栏应用。它把系统声音发送到优�
 macOS 应用与系统声音
           │
           ▼
-SpeakerRouter 虚拟输出
+SpeakerRouter 虚拟输出：按应用调音量 → 混音
           │  共享内存环形缓冲
           ▼
-软件音量与静音 → AUHAL → 选中的物理输出
+总音量与静音 → 峰值保护 → AUHAL → 选中的物理输出
 ```
 
 虚拟设备保留完整的 Core Audio 对象模型，但输入流只返回静音，SpeakerRouterApp
@@ -65,6 +67,7 @@ git clone --recurse-submodules https://github.com/liubaoyua/SpeakerRouter-macOS.
 ```sh
 swift test
 ./Scripts/build-driver.sh
+./Scripts/test-driver.sh
 ./Scripts/build-app.sh
 ```
 
@@ -87,6 +90,11 @@ swift test
 
 登录时启动仅会在 App 位于 `/Applications` 后注册。开发目录中的构建不会创建
 持久登录项。
+
+使用「应用音量」需要更新到随新版 App 提供的驱动。100% 保留原音量，150% 约
+为 +3.5 dB，200% 约为 +6 dB。多个应用同时播放时，若混音超过输出余量，峰值
+保护会暂时降低整个混音的增益。能识别宿主的应用会按 Bundle ID 恢复设置；
+无法确认宿主的辅助进程各自显示，设置只在该进程的音频连接内有效。
 
 ## 卸载
 

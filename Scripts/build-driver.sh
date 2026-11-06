@@ -24,6 +24,7 @@ xcrun clang \
   -bundle \
   -I "${audio_support_dir}/include" \
   "${source_dir}/NullAudio.c" \
+  "${source_dir}/SRClientVolumes.c" \
   "${audio_support_dir}/SRSharedAudioTransport.c" \
   -framework CoreAudio \
   -framework CoreFoundation \
