@@ -34,6 +34,8 @@ cp "${project_dir}/ThirdParty/mediaremote-adapter/bin/mediaremote-adapter.pl" \
   "${contents}/Resources/MediaRemoteAdapter/mediaremote-adapter.pl"
 cp "${project_dir}/ThirdParty/mediaremote-adapter/LICENSE" \
   "${contents}/Resources/ThirdPartyLicenses/MediaRemoteAdapter-LICENSE"
+cp "${project_dir}/ThirdParty/lucide/LICENSE" \
+  "${contents}/Resources/ThirdPartyLicenses/Lucide-LICENSE"
 cp "${project_dir}/Scripts/driver-manager.sh" \
   "${contents}/Resources/driver-manager.sh"
 cp "${project_dir}/Assets/SpeakerRouter.icns" \

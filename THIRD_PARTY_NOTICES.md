@@ -33,3 +33,9 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+## Lucide icons
+
+SpeakerRouter's menu panel uses a subset of [Lucide 1.17.0](https://github.com/lucide-icons/lucide/tree/1.17.0)
+icons. The ISC license and the MIT notice for icons derived from Feather are in
+[ThirdParty/lucide/LICENSE](ThirdParty/lucide/LICENSE).
