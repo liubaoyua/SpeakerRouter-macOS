@@ -19,8 +19,9 @@ struct SRSharedAudioBuffer {
     uint32_t mappingSize;
     uint32_t capacityFrames;
     uint32_t channelCount;
-    uint32_t reserved0;
-    uint32_t reserved1;
+    // Reader-owned state in the existing reserved header fields. The driver only writes samples.
+    uint32_t lastObservedWritePosition;
+    uint32_t observedWriteBurstFrames;
     _Atomic uint64_t writePosition;
     _Atomic uint64_t readPosition;
     _Atomic uint64_t requestedRenderFrames;
@@ -392,6 +393,8 @@ void SRSharedAudioBufferReset(SRSharedAudioBuffer* buffer) {
     atomic_store_explicit(&buffer->writePosition, 0, memory_order_relaxed);
     atomic_store_explicit(&buffer->readPosition, 0, memory_order_relaxed);
     atomic_store_explicit(&buffer->requestedRenderFrames, 0, memory_order_relaxed);
+    buffer->lastObservedWritePosition = 0;
+    buffer->observedWriteBurstFrames = 0;
     buffer->currentGain = atomic_load_explicit(&buffer->targetGain, memory_order_relaxed);
 }
 
@@ -478,11 +481,29 @@ static uint32_t readFrames(
     uint32_t framesToConsume = frameCount;
     bool resample = false;
     if(compensateForDrift && buffer->capacityFrames >= 8192) {
+        // The HAL can deliver a batch spanning several physical callbacks. A batch that
+        // arrived on time is not clock drift. Ignore large jumps caused by a stalled reader.
+        uint32_t writeAdvance = (uint32_t)writePosition - buffer->lastObservedWritePosition;
+        buffer->lastObservedWritePosition = (uint32_t)writePosition;
+        uint32_t maximumWriteBurstFrames = buffer->capacityFrames / 4;
+        if(maximumWriteBurstFrames > 8192) {
+            maximumWriteBurstFrames = 8192;
+        }
+        if(writeAdvance <= maximumWriteBurstFrames &&
+           writeAdvance > buffer->observedWriteBurstFrames) {
+            buffer->observedWriteBurstFrames = writeAdvance;
+        }
+
         uint64_t targetBufferedFrames = (uint64_t)frameCount * 2;
         if(targetBufferedFrames < 1024) {
             targetBufferedFrames = 1024;
         }
-        uint64_t maximumBufferedFrames = targetBufferedFrames + (uint64_t)frameCount * 4;
+        uint64_t upperDriftThreshold = targetBufferedFrames + frameCount;
+        uint64_t burstThreshold = (uint64_t)buffer->observedWriteBurstFrames + frameCount;
+        if(upperDriftThreshold < burstThreshold) {
+            upperDriftThreshold = burstThreshold;
+        }
+        uint64_t maximumBufferedFrames = upperDriftThreshold + (uint64_t)frameCount * 3;
         if(maximumBufferedFrames < 4096) {
             maximumBufferedFrames = 4096;
         }
@@ -502,7 +523,7 @@ static uint32_t readFrames(
 
         // Absorb normal hardware-clock error one frame per callback. Linear interpolation makes
         // the occasional extra/dropped source frame continuous instead of inserting a click.
-        if(available > targetBufferedFrames + frameCount &&
+        if(available > upperDriftThreshold &&
             available >= (uint64_t)frameCount + 1) {
             framesToConsume = frameCount + 1;
             resample = true;

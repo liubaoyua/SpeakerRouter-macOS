@@ -178,6 +178,30 @@ struct SharedAudioTransportTests {
     #expect(output.allSatisfy { $0 == 0.25 })
   }
 
+  @Test("A large producer batch plays through smaller output callbacks without gaps")
+  func batchedProducer() throws {
+    let transport = try #require(SRSharedAudioTransportCreate(131_072, 2, 0))
+    defer { SRSharedAudioTransportDestroy(transport) }
+    let buffer = SRSharedAudioTransportGetBuffer(transport)
+    let input = (0..<4096).flatMap { frame in
+      [Float(frame + 1), -Float(frame + 1)]
+    }
+    var output = [Float](repeating: 0, count: 512 * 2)
+
+    for _ in 0..<4 {
+      input.withUnsafeBufferPointer {
+        _ = SRSharedAudioBufferWrite(buffer, $0.baseAddress!, 4096)
+      }
+      for offset in stride(from: 0, to: input.count, by: output.count) {
+        let consumed = output.withUnsafeMutableBufferPointer {
+          SRSharedAudioBufferReadWithDriftCompensation(buffer, $0.baseAddress!, 512)
+        }
+        #expect(consumed == 512)
+        #expect(output.elementsEqual(input[offset..<(offset + output.count)]))
+      }
+    }
+  }
+
   @Test("Gain is clamped and smoothly reaches the target")
   func gain() throws {
     let transport = try #require(SRSharedAudioTransportCreate(8, 2, 0))
