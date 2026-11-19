@@ -16,6 +16,8 @@
   reporting for devices with independent clocks.
 - Active-AirPods removal pause and guarded reinsertion resume from local
   Bluetooth proximity advertisements.
+- Bounded recovery of still-connected AirPods whose audio output stays hidden
+  after reinsertion, using a separate Bluetooth reconnect helper.
 - Address-filtered connected-AirPods AACP placement monitoring, with BLE
   proximity advertisements retained as a fallback.
 - Real-time now-playing state and commands through a bundled BSD MediaRemote
@@ -45,6 +47,8 @@
   media-session implementations.
 - Stability of the internal `bluetoothd` AACP log format across macOS releases.
 - Sleep/wake, login, Core Audio restart, and driver update boundaries.
+- Hidden AirPods audio-output recovery and public IOBluetooth reconnect behavior
+  across devices and macOS releases.
 - Long-running latency, buffer pressure, and clock-drift behavior.
 - Gatekeeper behavior after Developer ID signing and notarization.
 

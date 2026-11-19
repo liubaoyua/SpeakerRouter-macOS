@@ -1,5 +1,6 @@
 import AppKit
 import CoreAudio
+import OSLog
 import ServiceManagement
 import SpeakerRouterCore
 import SwiftUI
@@ -97,9 +98,18 @@ final class RouterViewModel: ObservableObject {
   private lazy var mediaRemoteAdapter = MediaRemoteAdapterController { [weak self] playing in
     self?.mediaRemotePlayingChanged(playing)
   }
-  private lazy var airPodsWearMonitor = AirPodsWearMonitor { [weak self] wearState in
-    self?.airPodsWearStateChanged(wearState)
+  private lazy var airPodsWearMonitor = AirPodsWearMonitor { [weak self] wearState, isLiveUpdate in
+    self?.airPodsWearStateChanged(wearState, isLiveUpdate: isLiveUpdate)
   }
+  private let airPodsConnectionRecovery = AirPodsConnectionRecovery()
+  private let airPodsRecoveryLogger = Logger(
+    subsystem: "com.liubaoyuan.SpeakerRouter", category: "AirPodsRecovery"
+  )
+  private var airPodsRouteRecovery = AirPodsRouteRecovery()
+  private var monitoredAirPods: OutputDevice?
+  private var missingAirPods: OutputDevice?
+  private var airPodsReconnectTask: Task<Void, Never>?
+  private var resumeAfterAirPodsRecovery = false
   private let driverManager = DriverManager()
   private let relayEngine: AudioRelayEngine?
   private let store: FileRoutingStateStore
@@ -161,6 +171,7 @@ final class RouterViewModel: ObservableObject {
   }
 
   func select(_ uid: String) {
+    if uid != missingAirPods?.uid { cancelMissingAirPodsRecovery() }
     failedRouteAttempt = nil
     resetRelayHealthTracking()
     state.selectManually(uid: uid, discovered: liveDevices)
@@ -261,6 +272,17 @@ final class RouterViewModel: ObservableObject {
   private func applyDeviceSnapshot(_ result: Result<[OutputDevice], Error>) {
     do {
       let snapshot = try result.get()
+      if missingAirPods == nil,
+        let monitoredAirPods,
+        activePhysicalDeviceUID == monitoredAirPods.uid,
+        !snapshot.contains(where: { $0.uid == monitoredAirPods.uid }),
+        airPodsConnectionRecovery.isConnected(hardwareUID: monitoredAirPods.hardwareUID)
+      {
+        missingAirPods = monitoredAirPods
+        airPodsRecoveryLogger.notice("Active AirPods audio output disappeared while Bluetooth remains connected; retaining placement monitor")
+        airPodsRouteRecovery.outputDisappeared(at: ProcessInfo.processInfo.systemUptime)
+        cancelAirPodsPauseRetry()
+      }
       if relayEngine?.isRunning == true,
         DeviceDisconnectBehavior.shouldPauseMedia(
           activeDeviceUID: activePhysicalDeviceUID,
@@ -280,6 +302,22 @@ final class RouterViewModel: ObservableObject {
       lastError = nil
       if !driverState.isChanging {
         reconcileAudioRoute()
+      }
+      if let missingAirPods,
+        activePhysicalDeviceUID == missingAirPods.uid,
+        relayEngine?.isRunning == true
+      {
+        let shouldResume = resumeAfterAirPodsRecovery
+        airPodsRecoveryLogger.notice("AirPods audio output returned and relay is running")
+        self.missingAirPods = nil
+        resumeAfterAirPodsRecovery = false
+        airPodsRouteRecovery.cancel()
+        airPodsReconnectTask?.cancel()
+        airPodsReconnectTask = nil
+        airPodsConnectionRecovery.cancel()
+        if shouldResume, mediaRemoteAdapter.isPlaying != true, sendMediaPlay() {
+          airPodsWearBehavior.confirmResumedAfterReinsertion()
+        }
       }
     } catch {
       lastError = String(describing: error)
@@ -566,6 +604,7 @@ final class RouterViewModel: ObservableObject {
   }
 
   @objc private func relayHealthTimerFired() {
+    checkMissingAirPodsRecovery()
     guard !driverState.isChanging, !routeRecoveryInProgress,
       let relayEngine, relayEngine.isRunning
     else {
@@ -630,14 +669,25 @@ final class RouterViewModel: ObservableObject {
   }
 
   private func startAirPodsWearMonitoring(for device: OutputDevice) {
+    // Preserve the original bud's monitor while a hidden output uses a fallback.
+    if missingAirPods != nil, device.uid != missingAirPods?.uid {
+      if device.kind == .headphones, device.name.localizedCaseInsensitiveContains("airpods") {
+        cancelMissingAirPodsRecovery()
+      } else {
+        return
+      }
+    }
+    if monitoredAirPods?.uid == device.uid { return }
     cancelAirPodsPauseRetry()
     airPodsWearBehavior.reset()
     guard device.kind == .headphones,
       device.name.localizedCaseInsensitiveContains("airpods")
     else {
+      monitoredAirPods = nil
       airPodsWearMonitor.stop()
       return
     }
+    monitoredAirPods = device
     airPodsWearMonitor.start(
       deviceName: device.name,
       hardwareUID: device.hardwareUID
@@ -645,12 +695,32 @@ final class RouterViewModel: ObservableObject {
   }
 
   private func stopAirPodsWearMonitoring() {
+    cancelMissingAirPodsRecovery()
+    monitoredAirPods = nil
     cancelAirPodsPauseRetry()
     airPodsWearBehavior.reset()
     airPodsWearMonitor.stop()
   }
 
-  private func airPodsWearStateChanged(_ wearState: AirPodsWearState) {
+  private func airPodsWearStateChanged(_ wearState: AirPodsWearState, isLiveUpdate: Bool) {
+    if isLiveUpdate {
+      airPodsRouteRecovery.observeLiveWear(wearState, at: ProcessInfo.processInfo.systemUptime)
+    }
+    if missingAirPods != nil {
+      if wearState.inEarCount == 0 {
+        resumeAfterAirPodsRecovery = false
+        airPodsReconnectTask?.cancel()
+        airPodsReconnectTask = nil
+        airPodsConnectionRecovery.cancel()
+      }
+      let action = airPodsWearBehavior.observe(wearState)
+      if action == .requestPause { airPodsWearBehavior.cancelPauseRequest() }
+      if action == .requestPlay {
+        resumeAfterAirPodsRecovery = true
+      }
+      // Play is deferred until the physical AirPods output is actually restored.
+      return
+    }
     guard let relayEngine, relayEngine.isRunning,
       let activePhysicalDeviceUID,
       liveDevices.contains(where: {
@@ -690,6 +760,59 @@ final class RouterViewModel: ObservableObject {
     }
   }
 
+  private func cancelMissingAirPodsRecovery() {
+    guard missingAirPods != nil else { return }
+    missingAirPods = nil
+    resumeAfterAirPodsRecovery = false
+    airPodsRouteRecovery.cancel()
+    airPodsReconnectTask?.cancel()
+    airPodsReconnectTask = nil
+    airPodsConnectionRecovery.cancel()
+    monitoredAirPods = nil
+    airPodsWearBehavior.reset()
+    airPodsWearMonitor.stop()
+  }
+
+  private func checkMissingAirPodsRecovery() {
+    guard let target = missingAirPods, !driverState.isChanging,
+      airPodsReconnectTask == nil
+    else { return }
+    // Reevaluate the user's order as if the missing device were available.
+    // A manual lock or a reordered priority must not be overridden by recovery.
+    let allowsTarget = state.selectedDeviceUID(from: liveDevices + [target]) == target.uid
+    let shouldReconnect = airPodsRouteRecovery.shouldReconnect(
+      at: ProcessInfo.processInfo.systemUptime,
+      bluetoothConnected: airPodsConnectionRecovery.isConnected(hardwareUID: target.hardwareUID),
+      routingAllowsTarget: allowsTarget
+    )
+    if !airPodsRouteRecovery.isWaiting {
+      cancelMissingAirPodsRecovery()
+      return
+    }
+    guard shouldReconnect else { return }
+    airPodsRecoveryLogger.notice("Requesting one Bluetooth reconnect for hidden AirPods output")
+    routeStatus = "AirPods 音频输出未恢复，正在重新连接…"
+    airPodsReconnectTask = Task { [weak self] in
+      guard let self else { return }
+      let connected = await self.airPodsConnectionRecovery.reconnect(hardwareUID: target.hardwareUID)
+      guard !Task.isCancelled, self.missingAirPods?.uid == target.uid else { return }
+      self.airPodsRecoveryLogger.notice("AirPods Bluetooth reconnect completed: \(connected)")
+      self.airPodsReconnectTask = nil
+      // Bluetooth completion alone does not prove the audio endpoint returned.
+      // Refresh for up to five seconds, then let normal device events take over.
+      for _ in 0..<10 {
+        guard !Task.isCancelled, self.missingAirPods?.uid == target.uid else { return }
+        self.refresh()
+        do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+      }
+      if self.missingAirPods?.uid == target.uid {
+        self.lastError = connected
+          ? "AirPods 蓝牙已重连，但音频输出仍不可用，请在系统蓝牙菜单中重新连接"
+          : "AirPods 自动重连未成功，请在系统蓝牙菜单中重新连接"
+      }
+    }
+  }
+
   private func scheduleAirPodsPauseRetry() {
     cancelAirPodsPauseRetry()
     airPodsPauseRetryTask = Task { [weak self] in
@@ -722,6 +845,7 @@ final class RouterViewModel: ObservableObject {
     // The one-shot retry window has ended. Treat later playback as an explicit
     // user override so removing the remaining bud can request Pause again.
     airPodsWearBehavior.confirmResumedAfterReinsertion()
+    resumeAfterAirPodsRecovery = false
   }
 
   @discardableResult

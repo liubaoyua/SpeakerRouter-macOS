@@ -15,6 +15,7 @@ cd "${project_dir}"
 "${project_dir}/Scripts/build-mediaremote-adapter.sh" "${adapter_output_root}"
 swift build -c release --product SpeakerRouterApp
 swift build -c release --product SpeakerRouterGuard
+swift build -c release --product SpeakerRouterBluetoothRecovery
 
 mkdir -p \
   "${contents}/MacOS" \
@@ -26,6 +27,8 @@ cp "${project_dir}/.build/release/SpeakerRouterApp" \
   "${contents}/MacOS/SpeakerRouterApp"
 cp "${project_dir}/.build/release/SpeakerRouterGuard" \
   "${contents}/Helpers/SpeakerRouterGuard"
+cp "${project_dir}/.build/release/SpeakerRouterBluetoothRecovery" \
+  "${contents}/Helpers/SpeakerRouterBluetoothRecovery"
 /usr/bin/ditto "${driver_output_root}/SpeakerRouterHAL.driver" \
   "${contents}/Resources/SpeakerRouterHAL.driver"
 /usr/bin/ditto "${adapter_output_root}/MediaRemoteAdapter.framework" \

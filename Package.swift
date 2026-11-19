@@ -31,7 +31,13 @@ let package = Package(
         .linkedFramework("AppKit"),
         .linkedFramework("CoreAudio"),
         .linkedFramework("CoreBluetooth"),
+        .linkedFramework("IOBluetooth"),
       ]
+    ),
+    .executableTarget(
+      name: "SpeakerRouterBluetoothRecovery",
+      dependencies: ["SpeakerRouterCore"],
+      linkerSettings: [.linkedFramework("IOBluetooth")]
     ),
     .executableTarget(
       name: "SpeakerRouterGuard",

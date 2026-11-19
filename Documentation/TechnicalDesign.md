@@ -139,6 +139,21 @@ Adapter is unavailable, the App falls back to whether the virtual driver's
 producer frame count advanced recently. The inverse transition sends Play
 immediately, but only if SpeakerRouter previously requested Pause.
 
+When the active AirPods disappear from Core Audio but remain connected over
+Bluetooth, the App retains their placement monitor while using the normal
+fallback output; a recovery deadline of 120 seconds starts after fresh in-ear
+evidence, so a longer removal does not disable recovery. A live in-ear event (never the synthetic
+startup baseline) permits one reconnect after two seconds of missing output and
+one second of stable worn state. A 30-second cooldown spans recovery episodes.
+The user's priority order and manual lock are reevaluated before recovery; a
+real Bluetooth disconnect, different manual choice, or expiry cancels it.
+The bundled `SpeakerRouterBluetoothRecovery` helper uses public IOBluetooth
+baseband close/open calls for that exact paired AirPods device, with a 12-second
+parent deadline. Bluetooth success does not count as audio success: the App
+waits for Core Audio rediscovery and a running relay before resuming playback
+that it previously paused. A failed attempt leaves the fallback usable and
+reports a manual-reconnect message instead of repeatedly disconnecting the buds.
+
 A fixed 750 ms retry covers clients that briefly acknowledge Pause and then
 resume. After that one-shot retry, SpeakerRouter does not continuously enforce
 Pause, so the user can explicitly resume playback while wearing only one bud.

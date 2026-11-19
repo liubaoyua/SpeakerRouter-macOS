@@ -8,6 +8,13 @@ All notable changes are documented in this file.
   remember settings by application bundle ID, and protect the physical output
   from peaks when boosted apps play together. Requires a driver update.
 
+- Retain AirPods placement monitoring briefly after macOS hides a still-connected
+  audio output. Fresh in-ear events can trigger one bounded Bluetooth reconnect
+  when the output fails to return, with a cooldown and respect for manual routing.
+- Isolate Bluetooth recovery in a helper process with a deadline so a stalled
+  connection cannot block the menu bar or audio callbacks.
+- Defer a removal-related Play until the recovered AirPods output is running.
+
 ## 0.6.0 - 2026-08-04
 
 - Added bounded-latency clock-drift compensation for independent virtual and

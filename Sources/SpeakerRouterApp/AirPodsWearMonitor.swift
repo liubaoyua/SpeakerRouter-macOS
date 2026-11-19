@@ -7,7 +7,7 @@ final class AirPodsWearMonitor: NSObject, CBCentralManagerDelegate, @unchecked S
     let eventMessage: String
   }
 
-  private let onWearStateChanged: @MainActor (AirPodsWearState) -> Void
+  private let onWearStateChanged: @MainActor (AirPodsWearState, Bool) -> Void
   private var centralManager: CBCentralManager?
   private var logProcess: Process?
   private var logOutputBuffer = Data()
@@ -15,7 +15,7 @@ final class AirPodsWearMonitor: NSObject, CBCentralManagerDelegate, @unchecked S
   private var targetAddress: String?
   private var lastWearState: AirPodsWearState?
 
-  init(onWearStateChanged: @escaping @MainActor (AirPodsWearState) -> Void) {
+  init(onWearStateChanged: @escaping @MainActor (AirPodsWearState, Bool) -> Void) {
     self.onWearStateChanged = onWearStateChanged
     super.init()
   }
@@ -26,7 +26,7 @@ final class AirPodsWearMonitor: NSObject, CBCentralManagerDelegate, @unchecked S
       stop()
       return
     }
-    let address = Self.bluetoothAddress(from: hardwareUID)
+    let address = BluetoothDeviceAddress.from(hardwareUID: hardwareUID)
     guard targetName != normalizedName || targetAddress != address else { return }
 
     targetName = normalizedName
@@ -34,7 +34,7 @@ final class AirPodsWearMonitor: NSObject, CBCentralManagerDelegate, @unchecked S
     let baseline = AirPodsWearState(primaryInEar: true, secondaryInEar: true)
     lastWearState = baseline
     Task { @MainActor [onWearStateChanged] in
-      onWearStateChanged(baseline)
+      onWearStateChanged(baseline, false)
     }
     startPlacementLogMonitoring()
     if let centralManager {
@@ -176,7 +176,7 @@ final class AirPodsWearMonitor: NSObject, CBCentralManagerDelegate, @unchecked S
     guard targetName != nil, wearState != lastWearState else { return }
     lastWearState = wearState
     Task { @MainActor [onWearStateChanged] in
-      onWearStateChanged(wearState)
+      onWearStateChanged(wearState, true)
     }
   }
 
@@ -198,18 +198,4 @@ final class AirPodsWearMonitor: NSObject, CBCentralManagerDelegate, @unchecked S
     String(name.lowercased().filter { $0.isLetter || $0.isNumber })
   }
 
-  private static func bluetoothAddress(from hardwareUID: String) -> String? {
-    let components = hardwareUID
-      .uppercased()
-      .replacingOccurrences(of: ":", with: "-")
-      .split(separator: "-")
-    guard components.count >= 6 else { return nil }
-    let addressComponents = components.prefix(6)
-    guard addressComponents.allSatisfy({
-      $0.count == 2 && $0.allSatisfy(\.isHexDigit)
-    }) else {
-      return nil
-    }
-    return addressComponents.joined(separator: ":")
-  }
 }
