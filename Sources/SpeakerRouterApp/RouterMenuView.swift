@@ -9,7 +9,7 @@ struct RouterMenuView: View {
   @State private var confirmingDriverUninstall = false
 
   private let style = RouterPanelStyle()
-  private var panelShape: RoundedRectangle { RoundedRectangle(cornerRadius: 8) }
+  private var panelShape: RoundedRectangle { RoundedRectangle(cornerRadius: 16, style: .continuous) }
 
   var body: some View {
     VStack(spacing: 0) {

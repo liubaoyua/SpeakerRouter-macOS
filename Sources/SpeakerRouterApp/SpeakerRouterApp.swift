@@ -7,9 +7,8 @@ import SwiftUI
 @main
 struct SpeakerRouterApp: App {
   @NSApplicationDelegateAdaptor(RouterApplicationDelegate.self) private var appDelegate
-  @StateObject private var model = RouterViewModel()
 
-  private static let menuBarIcon: NSImage = {
+  static let menuBarIcon: NSImage = {
     let image = NSImage(size: NSSize(width: 22, height: 16), flipped: true) { _ in
       NSColor.black.setFill()
       NSColor.black.setStroke()
@@ -57,21 +56,20 @@ struct SpeakerRouterApp: App {
   }()
 
   var body: some Scene {
-    MenuBarExtra {
-      RouterMenuView(model: model)
-    } label: {
-      Label {
-        Text("SpeakerRouter")
-      } icon: {
-        Image(nsImage: Self.menuBarIcon)
-      }
-    }
-    .menuBarExtraStyle(.window)
+    Settings { EmptyView() }
   }
 }
 
 @MainActor
 final class RouterApplicationDelegate: NSObject, NSApplicationDelegate {
+  private var menuController: RouterStatusItemController?
+
+  func applicationDidFinishLaunching(_ notification: Notification) {
+    menuController = RouterStatusItemController(
+      model: RouterViewModel(), icon: SpeakerRouterApp.menuBarIcon
+    )
+  }
+
   func applicationWillTerminate(_ notification: Notification) {
     RouterViewModel.shared?.shutdown()
   }
