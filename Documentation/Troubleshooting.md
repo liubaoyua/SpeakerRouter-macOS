@@ -39,6 +39,19 @@ latency reporting. Update both components; an older installed driver cannot
 publish the physical destination latency. Reconnect the AirPods after updating
 if macOS still has the previous Bluetooth route cached.
 
+## AirPods playback briefly drops when recording or triggering a shortcut
+
+If the shortcut opens the AirPods microphone, macOS can interrupt stereo
+playback while switching to or from the Bluetooth hands-free mode. Keep AirPods
+as the output and choose a separate microphone in the recording app or in
+System Settings > Sound > Input. Close the Sound settings before testing again.
+SpeakerRouter's virtual input supplies silence and cannot be used for recording.
+
+To check a screenshot or another shortcut that only plays a sound, finish any
+voice input first, wait for stereo playback to return, then trigger the shortcut
+on its own. Note the time if the interruption still occurs; it helps distinguish
+a system sound during a Bluetooth transition from a separate playback problem.
+
 ## AirPods removal does not pause or reinsertion does not resume
 
 1. In System Settings > Privacy & Security > Bluetooth, allow SpeakerRouter.
